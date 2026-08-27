@@ -61,12 +61,12 @@
     }
     function rowToLoad(r) {
       return { id: r.id, loadNo: r.load_no, customer: r.customer, date: r.ship_date, notes: r.notes,
-               placements: r.placements || [], photos: r.photos || [],
+               placements: r.placements || [], photos: r.photos || [], tires: r.tires || [],
                created: Number(r.created) || 0, updated: Number(r.updated) || 0, version: r.version || 0 };
     }
     function loadToRow(l) {
       return { id: l.id, load_no: l.loadNo || '', customer: l.customer || '', ship_date: l.date || '',
-               notes: l.notes || '', placements: l.placements || [], photos: l.photos || [],
+               notes: l.notes || '', placements: l.placements || [], photos: l.photos || [], tires: l.tires || [],
                created: l.created || 0, updated: l.updated || 0, version: (l.version || 0) + 1,
                updated_at: new Date().toISOString() };
     }

@@ -844,7 +844,7 @@ function nextLoadNo() {
   return mx ? String(mx + 1) : '';
 }
 function newLoad() {
-  var ld = { id: uid(), loadNo: nextLoadNo(), customer: '', date: todayStr(), notes: '', placements: [], photos: [], created: Date.now(), updated: Date.now() };
+  var ld = { id: uid(), loadNo: nextLoadNo(), customer: '', date: todayStr(), notes: '', placements: [], photos: [], tires: [], created: Date.now(), updated: Date.now() };
   state.loads.unshift(ld);
   markDirty();
   go('editor', ld.id);
@@ -1535,6 +1535,12 @@ function renderEditor(root, ld) {
   canvasWrap.appendChild(svg);
 
   var toolbar = h('div', { class: 'toolbar' }, [
+    h('button', { class: 'tbtn mobileonly', title: 'Trailer palette', onclick: function () {
+      right.classList.remove('open'); left.classList.toggle('open');
+    } }, ['📚']),
+    h('button', { class: 'tbtn mobileonly', title: 'Load info, tires & photos', onclick: function () {
+      left.classList.remove('open'); right.classList.toggle('open');
+    } }, ['ℹ️']),
     tb('↶ Undo', function () { undo(); }, 'undoBtn'),
     tb('↷ Redo', function () { redo(); }, 'redoBtn'),
     h('div', { class: 'sep' }),
@@ -1588,6 +1594,17 @@ function renderEditor(root, ld) {
         field('Notes for the yard', 'notes', 'textarea', true)
       ])
     ]),
+    h('div', { class: 'insp-section' }, [
+      h('h3', null, ['Tires']),
+      h('div', { class: 'tireslist', id: 'tiresList' }),
+      h('div', { class: 'photoadd' }, [
+        h('button', { class: 'btn small', style: 'width:100%;justify-content:center', onclick: function () {
+          if (!ld.tires) ld.tires = [];
+          ld.tires.push({ id: uid(), style: '', lot: '', qty: '' });
+          ld.updated = Date.now(); markDirty(); renderTires();
+        } }, ['+ Add tire style'])
+      ])
+    ]),
     h('div', { class: 'insp-section' }, [h('h3', null, ['Selected']), selPanel]),
     h('div', { class: 'insp-section' }, [h('h3', null, ['On this load']), stackList]),
     h('div', { class: 'insp-section' }, [
@@ -1625,6 +1642,7 @@ function renderEditor(root, ld) {
   renderSelPanel();
   renderStackList();
   renderPhotos();
+  renderTires();
   renderKeyMap();
   if (hadViewport) applyViewport(); else fitView();
   syncUndoBtns();
@@ -2517,6 +2535,26 @@ function renderStackList() {
     sl.appendChild(h('div', { class: 'srow' }, [h('span', null, [k]), h('b', null, ['× ' + counts[k]])]));
   });
 }
+function renderTires() {
+  var tl = $('tiresList');
+  if (!tl || !editor) return;
+  var ld = editor.ld;
+  tl.innerHTML = '';
+  (ld.tires || []).forEach(function (t) {
+    function inp(key, ph, cls) {
+      var i = h('input', { type: 'text', placeholder: ph, class: cls || '' });
+      i.value = t[key] || '';
+      i.addEventListener('change', function () { t[key] = i.value; ld.updated = Date.now(); markDirty(); });
+      return i;
+    }
+    var del = h('button', { class: 'tiredel', title: 'Remove this tire style', onclick: function () {
+      ld.tires = (ld.tires || []).filter(function (x) { return x !== t; });
+      ld.updated = Date.now(); markDirty(); renderTires();
+    } }, ['×']);
+    tl.appendChild(h('div', { class: 'tirerow' }, [inp('style', 'Tire style / size'), inp('lot', 'Lot #'), inp('qty', 'Qty'), del]));
+  });
+  if (!(ld.tires || []).length) tl.appendChild(h('div', { class: 'tiresempty' }, ['No tire info on this load yet']));
+}
 function renderPhotos() {
   var pg = $('photoGrid');
   if (!pg || !editor) return;
@@ -2739,7 +2777,12 @@ function doPrint() {
     '</tr><tr>' +
     '<td colspan="3"><span class="lbl">Stack</span>' + esc(stackStr) + '</td>' +
     '<td colspan="2"><span class="lbl">Notes</span>' + esc(ld.notes || '—') + '</td>' +
-    '</tr></table>';
+    '</tr>' + (function () {
+      var ts = (ld.tires || []).filter(function (t) { return t.style || t.lot || t.qty; }).map(function (t) {
+        return [t.qty ? t.qty + ' ×' : '', t.style || '', t.lot ? 'Lot ' + t.lot : ''].filter(Boolean).join(' ');
+      }).join('   ·   ');
+      return ts ? '<tr><td colspan="5"><span class="lbl">Tires</span>' + esc(ts) + '</td></tr>' : '';
+    })() + '</table>';
   var wasSel = editor.sel;
   editor.sel = [];
   renderPlacements();

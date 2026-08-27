@@ -25,6 +25,7 @@ create table if not exists public.rs_loads (
   notes      text not null default '',
   placements jsonb not null default '[]',
   photos     jsonb not null default '[]',          -- [{id, file, ts}] file = storage path
+  tires      jsonb not null default '[]',          -- [{id, style, lot, qty}]
   created    bigint not null default 0,
   updated    bigint not null default 0,
   version    integer not null default 0,           -- bumped on every save (conflict check)

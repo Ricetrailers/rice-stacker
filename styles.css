@@ -309,3 +309,31 @@ kbd{background:var(--chip);border:1px solid var(--line);border-radius:4px;paddin
 .authcard input{width:100%}
 .authmsg{color:var(--bad);font-size:13px;min-height:18px;text-align:center}
 .authgate[hidden]{display:none}
+
+/* tires */
+.tireslist{padding:2px 14px 4px;display:flex;flex-direction:column;gap:6px}
+.tirerow{display:grid;grid-template-columns:1.5fr 1fr 46px 22px;gap:6px;align-items:center}
+.tirerow input{width:100%;font-size:13px;min-width:0}
+.tiredel{width:22px;height:26px;border-radius:5px;color:var(--muted);font-size:14px;display:flex;align-items:center;justify-content:center}
+.tiredel:hover{background:var(--chip);color:var(--bad)}
+.tiresempty{color:var(--muted);font-size:12px}
+
+/* mobile */
+.mobileonly{display:none}
+@media (max-width:820px){
+  header.top{gap:8px;padding:0 10px;height:48px}
+  .brand span{display:none}
+  header.top .btn{padding:6px 9px;font-size:12.5px}
+  .mobileonly{display:inline-flex}
+  .editor{display:flex;flex-direction:column;position:relative}
+  .editor .panel{position:absolute;top:0;bottom:0;left:0;width:min(86vw,330px);z-index:60;transform:translateX(-105%);transition:transform .2s ease;box-shadow:0 6px 30px rgba(0,0,0,.25);border-right:1px solid var(--line)}
+  .editor .panel.right{left:auto;right:0;transform:translateX(105%);border-left:1px solid var(--line)}
+  .editor .panel.open{transform:none}
+  .toolbar{flex-wrap:wrap}
+  .tbtn{padding:7px 9px;font-size:12.5px}
+  .formgrid input,.formgrid textarea,.tirerow input,.palette-search input{font-size:16px}
+}
+@media (pointer:coarse){
+  .apptab{padding:9px 14px}
+  .btn{padding:9px 14px}
+}
