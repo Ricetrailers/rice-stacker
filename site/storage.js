@@ -75,14 +75,14 @@
       return { id: r.id, loadNo: r.load_no, customer: r.customer, address: r.address || '', date: r.ship_date, notes: r.notes,
                status: r.status || 'prep', prepped: !!r.prepped, type: r.ltype || 'stack', custPickup: !!r.cust_pickup,
                prepDate: r.prep_date || '', prepTime: r.prep_time || '', stackDate: r.stack_date || '', stackTime: r.stack_time || '', truckCo: r.truck_co || '', truckDate: r.truck_date || '', truckTime: r.truck_time || '',
-               partsLocation:r.parts_location || '', placements: r.placements || [], photos: r.photos || [], tires: r.tires || [], items: r.items || [], docs: r.docs || [],
+               partsLocation:r.parts_location || '', stackMeta: r.stack_meta || {}, placements: r.placements || [], photos: r.photos || [], tires: r.tires || [], items: r.items || [], docs: r.docs || [],
                created: Number(r.created) || 0, updated: Number(r.updated) || 0, version: r.version || 0 };
     }
     function loadToRow(l) {
       return { id: l.id, load_no: l.loadNo || '', customer: l.customer || '', address: l.address || '', ship_date: l.date || '',
                status: l.status || 'prep', prepped: !!l.prepped, ltype: l.type || 'stack', cust_pickup: !!l.custPickup,
                prep_date: l.prepDate || '', prep_time: l.prepTime || '', stack_date: l.stackDate || '', stack_time: l.stackTime || '', truck_co: l.truckCo || '', truck_date: l.truckDate || '', truck_time: l.truckTime || '',
-               parts_location:l.partsLocation || '', notes: l.notes || '', placements: l.placements || [], photos: l.photos || [], tires: l.tires || [], items: l.items || [], docs: l.docs || [],
+               parts_location:l.partsLocation || '', stack_meta: l.stackMeta || {}, notes: l.notes || '', placements: l.placements || [], photos: l.photos || [], tires: l.tires || [], items: l.items || [], docs: l.docs || [],
                created: l.created || 0, updated: l.updated || 0, version: (l.version || 0) + 1,
                updated_at: new Date().toISOString() };
     }

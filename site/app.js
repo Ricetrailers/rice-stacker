@@ -1026,7 +1026,7 @@ function erpShip(iso) { var m = String(iso || '').match(/^\d{4}-(\d\d)-(\d\d)/);
 function erpHow(head) { return head.cust_pickup ? 'Customer pickup' : head.ltype === 'semi' ? 'Semi' : 'Stack'; }
 function erpChanged() {
   if (erpPickerRedraw) erpPickerRedraw();
-  if (route.view === 'home' && !document.querySelector('.loadrow.open')) renderRoute();
+  if (route.view === 'home' && !document.querySelector('.loadrow.open, .loadcard.open')) renderRoute();
   else if (route.view === 'editor') renderErpPanel();
 }
 function loadErp(thenSync) {
@@ -1725,7 +1725,7 @@ function renderHome(root) {
   var currentHomeView = isYard() ? yardHomeView : homeView;
   function changeHomeView(id) { if (isYard()) yardHomeView = id; else homeView = id; renderRoute(); }
   var loads = state.loads.slice();
-  function loadRow(ld) {
+  function loadRow(ld, asCard) {
     var trailerCount = ld.placements.filter(function (p) { var pr = getProfile(p.profileId); return !pr || pr.kind !== 'truck'; }).length;
     var stat = ld.status || 'prep';
     var er = erpFor(ld), ep = er ? erpProgress(er) : null, row;
@@ -1734,7 +1734,7 @@ function renderHome(root) {
     if (ld.photos.length) files.push(ld.photos.length + ' photo' + (ld.photos.length > 1 ? 's' : ''));
     var sub = [ld.address, ld.notes].concat(files).filter(Boolean).join(' \u00b7 ');
     var badges = [h('span',{class:'workflow-badge stage-'+workflowStage(ld)},[workflowLabel(ld)])];
-    if (autoUnchecked(ld)) badges.push(h('span', { class: 'pill autotag', title: 'The app stacked this load from past loads. Nobody has checked it yet.' }, ['Auto stacked, not checked']));
+    if (stat !== 'picked') badges.push(stackLabel(ld));
     // Where the trailers are in production, straight from the ERP, for whoever is not on the floor.
     if (ep && ep.total && stat !== 'picked') {
       badges.push(erpChip(er));
@@ -1786,7 +1786,7 @@ function renderHome(root) {
         ])
       ]);
     }
-    row = h('div', { class: 'loadrow', 'data-tour-load': practiceSession ? 'true' : null, onclick: function () { go('editor', ld.id); } }, [
+    row = h('div', { class: asCard ? 'loadcard' : 'loadrow', draggable: asCard && !isYard() ? 'true' : null, ondragstart: function (e) { if (!asCard || isYard()) return; e.dataTransfer.setData('text/plain', ld.id); e.dataTransfer.effectAllowed = 'move'; row.classList.add('dragging'); }, ondragend: function () { row.classList.remove('dragging'); }, 'data-tour-load': practiceSession ? 'true' : null, onclick: function () { go('editor', ld.id); } }, [
       h('div', { class: 'lno' }, [ld.loadNo ? '#' + ld.loadNo : '(no #)', h('small', { title: er && er.head.ship_date ? 'Planned ship date in the ERP' : 'Ship date' }, [er && er.head.ship_date ? 'Ships ' + erpShip(er.head.ship_date) : ld.date || ''])]),
       h('div', { class: 'lcust' }, [ld.customer || h('span', { style: 'color:var(--muted);font-weight:400' }, ['No customer']), sub ? h('small', null, [sub.slice(0, 90)]) : null]),
       h('div', { class: 'lmeta' }, [h('span', { class: 'ltrl' + (ep && ep.total && trailerCount > ep.total ? ' over' : ''), title: ep && ep.total ? 'Trailers placed on the stack sheet, out of how many the ERP order has' : 'Trailers placed on the stack sheet' }, [ep && ep.total ? trailerCount + ' of ' + ep.total + ' placed' : trailerCount + ' trl'])].concat(badges)),
@@ -1797,7 +1797,7 @@ function renderHome(root) {
   function section(title, rows, extraHead, emptyText) {
     return h('div', { class: 'card boardsec' + (rows.length ? '' : ' empty') }, [
       h('div', { class: 'card-head' }, [h('h2', null, [title + (rows.length ? ' \u00b7 ' + rows.length : '')]), extraHead])
-    ].concat(rows.length ? rows.map(loadRow) : [h('div', { class: 'boardempty' }, [emptyText || 'Nothing here'])]));
+    ].concat(rows.length ? rows.map(function (l) { return loadRow(l); }) : [h('div', { class: 'boardempty' }, [emptyText || 'Nothing here'])]));
   }
   var active = loads.filter(function (l) { return (l.status || 'prep') !== 'picked'; });
   var booked = active.filter(function (l) { return l.truckDate; }).sort(function (a, b) {
@@ -1824,7 +1824,7 @@ function renderHome(root) {
       } }, ['Show']) : null
     ]),
     (function () {
-      var b = h('div', { class: 'pickedbody' }, picked.map(loadRow));
+      var b = h('div', { class: 'pickedbody' }, picked.map(function (l) { return loadRow(l); }));
       b.hidden = true;
       return b;
     })()
@@ -1865,8 +1865,26 @@ function renderHome(root) {
     })(),
     currentHomeView==='cal' && isYard()?h('p',{class:'sub'},['Schedule · view only. Browse upcoming prep, stacking and truck arrivals. Open a load for details; schedule changes are handled by the office.']):null,
     currentHomeView==='cal'?null:h('div',{class:'stage-summary'},stages.map(function(stage,i){return h('button',{class:'stage-tile stage-'+i,onclick:function(){changeHomeView('board');document.getElementById('stage-'+i).scrollIntoView({behavior:'smooth',block:'start'});}},[h('strong',null,[String(stage[1].length)]),h('span',null,[stage[0]])]);})),
-    currentHomeView==='cal' ? renderCalendar() : h('div',{class:'workflow-stages'},stages.map(function(stage,i){
-      var card=section((i+1)+'. '+stage[0],stage[1],h('span',{class:'stage-description'},[stage[2]]),'No loads in this stage');card.id='stage-'+i;card.classList.add('stage-'+i);return card;
+    currentHomeView==='cal' ? renderCalendar() : h('div',{class:'workflow-stages board',style:'--cols:'+stages.length},stages.map(function(stage,i){
+      // One column per stage, soonest ship date on top. Office accounts can drag a card to another column.
+      var shipOf=function(l){var r=erpFor(l);return (r&&r.head.ship_date)||l.date||'9999';};
+      var rows=stage[1].slice().sort(function(a,b){return shipOf(a).localeCompare(shipOf(b))||String(a.loadNo).localeCompare(String(b.loadNo));});
+      var col=h('div',{class:'boardcol stage-'+i+(rows.length?'':' is-empty'),id:'stage-'+i},[
+        h('div',{class:'boardcol-head',title:stage[2]},[h('h2',null,[stage[0]]),h('b',null,[String(rows.length)])]),
+        h('div',{class:'boardcol-body'},rows.length?rows.map(function(l){return loadRow(l,true);}):[h('div',{class:'boardempty'},['None'])])
+      ]);
+      if(!isYard()){
+        col.addEventListener('dragover',function(e){e.preventDefault();e.dataTransfer.dropEffect='move';col.classList.add('dropping');});
+        col.addEventListener('dragleave',function(e){if(!col.contains(e.relatedTarget))col.classList.remove('dropping');});
+        col.addEventListener('drop',function(e){
+          e.preventDefault();col.classList.remove('dropping');
+          var id=e.dataTransfer.getData('text/plain'),l=state.loads.filter(function(x){return x.id===id;})[0];
+          if(!l||workflowStage(l)===i)return;
+          l.status=['open','prep','prep','stack','ready'][i];l.prepped=i>=2;l.updated=Date.now();markDirty();renderRoute();
+          toast((l.loadNo?'#'+l.loadNo:'Load')+' moved to '+stage[0]);
+        });
+      }
+      return col;
     })),
     isYard()?null:h('details',{class:'dashboard-extra'},[h('summary',null,['Pickup bookings · '+booked.length]),section('Scheduled pickups',booked,null,'No pickups scheduled')]),
     isYard()?null:pickedWrap,
@@ -3904,15 +3922,35 @@ function autoUnchecked(ld) {
   var t = (ld.placements || []).filter(function (pl) { var pr = getProfile(pl.profileId); return pr && pr.kind !== 'truck'; });
   return t.length > 0 && t.every(function (pl) { return pl.auto; });
 }
-function markChecked(ld) { (ld.placements || []).forEach(function (pl) { delete pl.auto; }); }
+function markChecked(ld) {
+  var was = autoUnchecked(ld);
+  (ld.placements || []).forEach(function (pl) { delete pl.auto; });
+  if (was) {
+    ld.stackMeta = Object.assign({}, ld.stackMeta || {}, { by: 'auto', checkedBy: whoAmI(), checkedAt: Date.now() });
+  }
+}
+function whoAmI() { return String(currentUserEmail || '').split('@')[0] || 'the office'; }
+/* One of four answers on every load: nothing on the sheet, a person stacked it, the app stacked it and
+   nobody has looked, or the app stacked it and a person signed off. */
+function stackState(ld) {
+  var n = (ld.placements || []).filter(function (pl) { var pr = getProfile(pl.profileId); return pr && pr.kind !== 'truck'; }).length;
+  var m = ld.stackMeta || {};
+  if (!n) return { k: 'none', label: 'Not stacked yet', tip: 'Nothing is on the stack sheet.' };
+  if (autoUnchecked(ld)) return { k: 'auto', label: 'Auto stacked, not checked', tip: 'The app stacked this load' + (m.from ? ' like load #' + m.from : ' from past loads') + '. Nobody has checked it yet.' };
+  if (m.by === 'auto') {
+    var when = m.checkedAt ? new Date(m.checkedAt).toLocaleDateString(undefined, { month: 'numeric', day: 'numeric' }) : '';
+    return { k: 'autook', label: m.checkedBy ? 'Auto, checked by ' + m.checkedBy : 'Auto, moved on by the crew', tip: 'The app stacked this load' + (m.checkedBy ? ' and ' + m.checkedBy + ' checked it' + (when ? ' on ' + when : '') : ' and the crew moved it on to stacking') + '.' };
+  }
+  return { k: 'hand', label: 'Stacked by hand', tip: 'A person placed the trailers on this sheet.' };
+}
+function stackLabel(ld) { var st = stackState(ld); return h('span', { class: 'pill stacktag ' + st.k, title: st.tip }, [st.label]); }
 function renderAutoTag() {
   var el = $('autoTag');
   if (!el || !editor) return;
   el.innerHTML = '';
   var ld = editor.ld;
-  if (!autoUnchecked(ld)) return;
-  el.appendChild(h('span', { class: 'pill autotag', title: 'The app stacked this load from past loads. Nobody has checked it yet.' }, ['Auto stacked, not checked']));
-  if (!isYard()) el.appendChild(h('button', { class: 'btn small', title: 'Use this when the stack is right as it is', onclick: function () {
+  el.appendChild(stackLabel(ld));
+  if (autoUnchecked(ld) && !isYard()) el.appendChild(h('button', { class: 'btn small', title: 'Use this when the stack is right as it is', onclick: function () {
     markChecked(ld); ld.updated = Date.now(); markDirty(); renderAutoTag(); toast('Marked as checked');
   } }, ['Looks right']));
 }
@@ -4061,6 +4099,7 @@ function autoStack(opts) {
   if (!trailers.length) { toast('Nothing to stack — add some trailers first'); return; }
   if (!opts.noSnapshot) snapshot();
   trailers.forEach(function (t) { t.pl.auto = 1; });
+  editor.ld.stackMeta = { by: 'auto', at: Date.now() };
   editor.autoRun = true;
   setTimeout(function () { if (editor) editor.autoRun = false; }, 0);
   // Lay it out like the closest load the crew has stacked before, when there is one.
@@ -4163,6 +4202,7 @@ function autoStack(opts) {
     afterMutate();
     fitView();
     var like = plan.from.loadNo ? 'load #' + plan.from.loadNo : 'an earlier load';
+    if (plan.from.loadNo) editor.ld.stackMeta.from = plan.from.loadNo;
     if (missed) toast(missed + ' trailer' + (missed > 1 ? 's' : '') + ' could not be placed. Stack the rest by hand.', true);
     else if (topMost > HCAP + 0.001 && topMost > wasTop + 3) toast('Stacked like ' + like + ', but it comes out ' + Math.round(topMost - Math.max(wasTop, HCAP)) + '" taller than that load did. Rework it before it ships.', true);
     else toast(plan.same ? 'Stacked the same way as ' + like + ' (same trailers). Check it over.' : 'Stacked the way the crew did ' + like + ', the closest of ' + plan.examples + ' past loads. Check it and adjust.');
