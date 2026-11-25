@@ -647,6 +647,8 @@ function startApp() {
     if (!isYard() && migrateGroups(state)) changed = true;
     if (changed) markDirty();
     renderRoute();
+    loadErp(true);
+    if (!window.__erpTimer) window.__erpTimer = setInterval(function () { if (!document.hidden) syncErp(false); }, 10 * 60000);
     // Learning tools are optional and opened through Help.
   }).catch(function (err) {
     toast('Couldn’t load data' + (err && err.message ? ': ' + err.message : '') + ' — check config.js and your connection', true);
@@ -978,6 +980,205 @@ function attachLoadDocuments(ld, button, refresh) {
   input.addEventListener('cancel',function(){input.remove();});
   document.body.appendChild(input);input.click();
 }
+/* ---------- ERP (Metasystems) loads ----------
+   erp.rows is what the ERP says about each load number: customer, planned ship date, how it ships,
+   and every trailer on the order with where it is in production. Read only. Stacker's own loads
+   stay the crew's to edit; the ERP list is the starting point, not a lock. */
+var erp = { rows: {}, loaded: false, syncing: false, error: '', at: 0 };
+var erpPickerRedraw = null;
+function erpFor(ld) { return ld && ld.loadNo ? erp.rows[String(ld.loadNo).trim()] || null : null; }
+function erpStage(t) {
+  var s = String(t.status || '').trim();
+  if (s === 'Completed') return { k: 'done', label: 'Finished' };
+  if (s === 'Stock') return { k: 'done', label: 'In stock' };
+  if (s === '' || s === 'No Order') return { k: 'todo', label: 'Not released' };
+  if (s === 'Ordered') return { k: 'todo', label: 'Ordered' };
+  if (s === 'Released') return { k: 'todo', label: 'Not started' };
+  // Anything else is the work center the trailer is sitting at: Welding Assembly, Paint, Flooring.
+  return { k: 'wip', label: 'In ' + s.toLowerCase() };
+}
+function erpProgress(row) {
+  var t = (row && row.trailers) || [], out = { total: t.length, done: 0, wip: 0, todo: 0, where: {}, weight: 0 };
+  t.forEach(function (x) {
+    var st = erpStage(x); out[st.k]++; out.weight += Number(x.dry_weight) || 0;
+    if (st.k !== 'done') out.where[st.label] = (out.where[st.label] || 0) + 1;
+  });
+  out.ready = out.total > 0 && out.done === out.total;
+  return out;
+}
+function erpProgressText(p) {
+  if (!p.total) return 'No trailers on the order';
+  if (p.ready) return p.total === 1 ? 'Trailer is finished' : 'All ' + p.total + ' finished';
+  return p.done + ' of ' + p.total + ' finished';
+}
+function erpWhereText(p) {
+  return Object.keys(p.where).map(function (k) { return p.where[k] + ' ' + k.charAt(0).toLowerCase() + k.slice(1); }).join(' · ');
+}
+function erpChip(row) {
+  var p = erpProgress(row);
+  if (!p.total) return null;
+  return h('span', { class: 'pill erpchip ' + (p.ready ? 'ready' : p.done || p.wip ? 'part' : 'none'), title: erpWhereText(p) || 'Every trailer on this load is finished' }, [
+    h('i', { class: 'erpbar' }, [h('i', { style: 'width:' + Math.round(100 * p.done / p.total) + '%' })]),
+    erpProgressText(p)
+  ]);
+}
+function erpShip(iso) { var m = String(iso || '').match(/^\d{4}-(\d\d)-(\d\d)/); return m ? (+m[1]) + '/' + (+m[2]) : ''; }
+function erpHow(head) { return head.cust_pickup ? 'Customer pickup' : head.ltype === 'semi' ? 'Semi' : 'Stack'; }
+function erpChanged() {
+  if (erpPickerRedraw) erpPickerRedraw();
+  if (route.view === 'home' && !document.querySelector('.loadrow.open')) renderRoute();
+  else if (route.view === 'editor') renderErpPanel();
+}
+function loadErp(thenSync) {
+  if (!RS_STORAGE.erpLoads) return;
+  RS_STORAGE.erpLoads().then(function (rows) {
+    erp.rows = {}; erp.at = 0;
+    rows.forEach(function (r) { erp.rows[r.load_no] = r; var t = Date.parse(r.fetched_at) || 0; if (t > erp.at) erp.at = t; });
+    erp.loaded = true; erp.error = '';
+    erpChanged();
+    if (thenSync && Date.now() - erp.at > 10 * 60000) syncErp(false);
+  }).catch(function (e) { erp.loaded = true; erp.error = (e && e.message) || 'Could not read the ERP load list'; erpChanged(); });
+}
+function syncErp(force) {
+  if (erp.syncing || !RS_STORAGE.erpSync) return;
+  erp.syncing = true; erpChanged();
+  RS_STORAGE.erpSync(force).then(function (res) {
+    erp.syncing = false;
+    if (res && res.error) erp.error = res.error;
+    loadErp(false);
+  }).catch(function (e) {
+    erp.syncing = false; erp.error = (e && e.message) || 'The ERP did not answer';
+    if (force) toast('Could not refresh from the ERP. Showing the last list.', true);
+    erpChanged();
+  });
+}
+function erpLookup(no) {
+  if (!RS_STORAGE.erpLoad || !no) return;
+  toast('Looking up #' + no + ' in the ERP…');
+  RS_STORAGE.erpLoad(String(no).trim()).then(function (res) {
+    if (res && res.found && res.row) { erp.rows[res.row.load_no] = res.row; erpChanged(); }
+    else toast(res && res.error ? res.error : 'The ERP has no load #' + no, true);
+  }).catch(function () { toast('The ERP did not answer. Try again in a minute.', true); });
+}
+function erpAgeText() {
+  if (erp.syncing) return 'Checking the ERP…';
+  if (!erp.loaded) return 'Loading the ERP load list…';
+  if (!erp.at) return erp.error ? 'ERP not reachable' : 'No ERP loads yet';
+  var m = Math.round((Date.now() - erp.at) / 60000);
+  return 'ERP checked ' + (m < 1 ? 'just now' : m < 60 ? m + ' min ago' : m < 1440 ? Math.round(m / 60) + ' hr ago' : Math.round(m / 1440) + ' days ago');
+}
+/* Open ERP loads that are not in Stacker yet, soonest ship date first. */
+function erpUnstarted() {
+  var have = {};
+  state.loads.forEach(function (l) { if (l.loadNo) have[String(l.loadNo).trim()] = 1; });
+  return Object.keys(erp.rows).map(function (k) { return erp.rows[k]; }).filter(function (r) {
+    return r.head && r.head.erp_status === 'open' && !have[r.load_no] && ((r.trailers || []).length || r.parts_orders);
+  }).sort(function (a, b) { return (a.head.ship_date || '9').localeCompare(b.head.ship_date || '9') || a.load_no.localeCompare(b.load_no); });
+}
+function erpPicker(onPick) {
+  var q = h('input', { placeholder: 'Search load # or customer', style: 'width:100%', 'aria-label': 'Search ERP loads' });
+  var listEl = h('div', { class: 'erp-picklist' });
+  var age = h('span', { class: 'erp-age' });
+  q.addEventListener('keydown', function (e) { e.stopPropagation(); });
+  function draw() {
+    if (!document.body.contains(listEl) && listEl.childNodes.length) { erpPickerRedraw = null; return; }
+    age.textContent = erpAgeText();
+    listEl.innerHTML = '';
+    var term = q.value.trim().toLowerCase();
+    var all = erpUnstarted();
+    var rows = term ? all.filter(function (r) { return (r.load_no + ' ' + (r.head.customer || '')).toLowerCase().indexOf(term) !== -1; }) : all;
+    if (!rows.length) {
+      listEl.appendChild(h('div', { class: 'boardempty' }, [!erp.loaded ? 'Loading loads from the ERP…' : term ? 'No open ERP load matches “' + q.value.trim() + '”' : erp.error && !all.length ? 'Could not reach the ERP. Enter the load by hand below.' : 'Every open ERP load is already in Stacker']));
+      return;
+    }
+    rows.slice(0, 80).forEach(function (r) {
+      var p = erpProgress(r), n = p.total;
+      listEl.appendChild(h('button', { class: 'erp-pick', onclick: function () { onPick(r); } }, [
+        h('span', { class: 'epno' }, ['#' + r.load_no]),
+        h('span', { class: 'epmain' }, [
+          h('b', null, [r.head.customer || 'No customer']),
+          h('small', null, [[r.head.ship_date ? 'Ships ' + erpShip(r.head.ship_date) : 'No ship date', erpHow(r.head), n ? n + (n === 1 ? ' trailer' : ' trailers') : 'Parts only'].join(' · ')])
+        ]),
+        erpChip(r)
+      ]));
+    });
+    if (rows.length > 80) listEl.appendChild(h('div', { class: 'boardempty' }, [(rows.length - 80) + ' more. Search to narrow it down.']));
+  }
+  q.addEventListener('input', draw);
+  erpPickerRedraw = draw;
+  draw();
+  return h('div', { class: 'erp-picker' }, [
+    h('div', { class: 'erp-pickhead' }, [
+      h('b', null, ['Pick a load from the ERP']), age,
+      h('button', { class: 'btn small ghost', title: 'Check the ERP again now', onclick: function () { syncErp(true); } }, ['↻ Refresh'])
+    ]),
+    q, listEl
+  ]);
+}
+/* The stacking screen's "On the order" panel: what the ERP ordered against what is placed. */
+function renderErpPanel() {
+  var el = $('erpPanel');
+  if (!el || !editor) return;
+  el.innerHTML = '';
+  var ld = editor.ld, r = erpFor(ld);
+  if (!r) {
+    el.appendChild(h('div', { class: 'tiresempty' }, [!ld.loadNo ? 'This load has no load number, so there is no ERP order to show.' : !erp.loaded ? 'Loading from the ERP…' : 'Load #' + ld.loadNo + ' is not in the ERP list.']));
+    if (ld.loadNo && erp.loaded) el.appendChild(h('div', { class: 'photoadd' }, [h('button', { class: 'btn small', style: 'width:100%;justify-content:center', onclick: function () { erpLookup(ld.loadNo); } }, ['Look it up in the ERP'])]));
+    return;
+  }
+  var p = erpProgress(r), placed = {}, groups = [], gix = {};
+  ld.placements.forEach(function (pl) { var pr = getProfile(pl.profileId); if (pr && pr.kind !== 'truck') placed[pl.profileId] = (placed[pl.profileId] || 0) + 1; });
+  (r.trailers || []).forEach(function (t) {
+    var key = t.profile_id && getProfile(t.profile_id) ? t.profile_id : '?' + t.model_code;
+    if (gix[key] == null) { gix[key] = groups.length; groups.push({ key: key, profile: key.charAt(0) === '?' ? null : getProfile(key), list: [] }); }
+    groups[gix[key]].list.push(t);
+  });
+  el.appendChild(h('div', { class: 'erpsum' }, [
+    erpChip(r),
+    h('small', null, [[erpWhereText(p), r.head.ship_date ? 'ships ' + erpShip(r.head.ship_date) : '', p.weight ? Math.round(p.weight).toLocaleString() + ' lb dry' : ''].filter(Boolean).join(' · ')])
+  ]));
+  if (r.head.notes) el.appendChild(h('div', { class: 'erpnote' }, [r.head.notes]));
+  var missing = [];
+  groups.forEach(function (g) {
+    var need = g.list.length, have = g.profile ? Math.min(placed[g.key] || 0, need) : 0, gp = erpProgress({ trailers: g.list });
+    if (g.profile) for (var i = have; i < need; i++) missing.push(g.profile);
+    var models = Object.keys(g.list.reduce(function (a, t) { a[t.model_code] = 1; return a; }, {})).join(', ');
+    el.appendChild(h('div', { class: 'erprow' + (g.profile ? have >= need ? ' ok' : '' : ' nodraw') }, [
+      h('div', { class: 'ermain' }, [
+        h('b', null, [g.profile ? g.profile.name : g.list[0].description || g.list[0].model_code, h('span', null, [' × ' + need])]),
+        h('small', null, [models + ' · ' + (gp.ready ? 'finished' : gp.done + ' finished' + (erpWhereText(gp) ? ', ' + erpWhereText(gp) : ''))])
+      ]),
+      !g.profile ? h('span', { class: 'erstate warn', title: 'No stack drawing is matched to this model yet. Place the closest drawing from the library.' }, ['No drawing'])
+        : have >= need ? h('span', { class: 'erstate ok' }, ['✓ placed'])
+        : isYard() ? h('span', { class: 'erstate' }, [have + ' of ' + need + ' placed'])
+        : h('button', { class: 'btn small', title: 'Put one on the sheet', onclick: function () { addPlacement(g.profile); } }, ['+ Place ' + (have + 1) + ' of ' + need])
+    ]));
+  });
+  // Anything on the sheet that the order does not call for. Allowed, just pointed out.
+  var want = {};
+  groups.forEach(function (g) { if (g.profile) want[g.key] = g.list.length; });
+  Object.keys(placed).forEach(function (id) {
+    var over = placed[id] - (want[id] || 0);
+    if (over > 0) el.appendChild(h('div', { class: 'erprow extra' }, [
+      h('div', { class: 'ermain' }, [h('b', null, [getProfile(id).name, h('span', null, [' × ' + over])]), h('small', null, ['Added by hand, not on the ERP order'])]),
+      h('span', { class: 'erstate warn' }, ['Extra'])
+    ]));
+  });
+  if (missing.length > 1 && !isYard()) el.appendChild(h('div', { class: 'photoadd' }, [
+    h('button', { class: 'btn small primary', style: 'width:100%;justify-content:center', onclick: function () { missing.forEach(function (pr) { addPlacement(pr); }); toast(missing.length + ' trailers placed. Drag them into the stack.'); } }, ['Place all ' + missing.length + ' still to stack'])
+  ]));
+  el.appendChild(h('details', { class: 'erpdetail' }, [
+    h('summary', null, ['Trailer by trailer']),
+    h('div', null, (r.trailers || []).map(function (t) {
+      var st = erpStage(t);
+      return h('div', { class: 'erptr' }, [h('code', null, [t.serial || '—']), h('span', null, [t.model_code]), h('span', { class: 'erstage ' + st.k }, [st.label])]);
+    }))
+  ]));
+  el.appendChild(h('div', { class: 'erpfoot' }, [
+    h('span', null, [erpAgeText()]),
+    h('button', { class: 'btn small ghost', onclick: function () { erpLookup(ld.loadNo); } }, ['↻'])
+  ]));
+}
 function newLoad() {
   var cust = h('input', { placeholder: 'Customer / destination', style: 'width:100%' });
   var addr = h('textarea', { rows: 2, placeholder: 'Address', style: 'width:100%' });
@@ -990,6 +1191,13 @@ function newLoad() {
   var msg = h('div', { style: 'color:var(--bad);font-size:12.5px;min-height:16px' });
   var scrim = h('div', { class: 'modal-scrim' });
   var pending = { items: null, shipDate: '', pickFile: null, proFile: null };
+  function fromErp(r) {
+    erpPickerRedraw = null; scrim.remove();
+    var ld = { id: uid(), loadNo: r.load_no, customer: r.head.customer || '', address: '', date: r.head.ship_date || todayStr(), notes: r.head.notes || '', placements: [], photos: [], tires: [], items: [], docs: [], status: 'open', prepped: false, type: r.head.ltype === 'semi' ? 'semi' : 'stack', custPickup: !!r.head.cust_pickup, truckCo: '', truckDate: '', truckTime: '', prepDate: '', prepTime: '', stackDate: '', stackTime: '', created: Date.now(), updated: Date.now() };
+    state.loads.unshift(ld);
+    markDirty();
+    go('editor', ld.id);
+  }
   function pdfBtn(label, onFile) {
     var b = h('button', { class: 'btn small ghost', style: 'width:100%;justify-content:center' }, [label]);
     b.addEventListener('click', function () {
@@ -1034,13 +1242,15 @@ function newLoad() {
   });
   addr.addEventListener('keydown', function (e) { if (e.key === 'Escape') scrim.remove(); e.stopPropagation(); });
   function lbl(t) { return h('label', { style: 'display:block;font:600 10.5px/1.8 Barlow,sans-serif;letter-spacing:.09em;text-transform:uppercase;color:var(--muted)' }, [t]); }
-  scrim.appendChild(h('div', { class: 'modal small' }, [
+  scrim.appendChild(h('div', { class: 'modal small newload' }, [
     h('div', { class: 'modal-head' }, [
       h('h2', { style: 'font-size:17px' }, ['New load']),
-      h('button', { class: 'iconbtn', onclick: function () { scrim.remove(); } }, ['\u2715'])
+      h('button', { class: 'iconbtn', onclick: function () { erpPickerRedraw = null; scrim.remove(); } }, ['\u2715'])
     ]),
     h('div', { class: 'modal-body' }, [
       h('div', { style: 'display:flex;flex-direction:column;gap:10px' }, [
+        erpPicker(fromErp),
+        h('div', { class: 'erp-or' }, ['or enter one by hand']),
         pickBtn,
         proBtn,
         h('div', { style: 'display:flex;gap:10px' }, [
@@ -1061,7 +1271,6 @@ function newLoad() {
     ])
   ]));
   document.body.appendChild(scrim);
-  setTimeout(function () { cust.focus(); }, 0);
 }
 function duplicateLoad(src) {
   var copy = JSON.parse(JSON.stringify(src));
@@ -1518,8 +1727,18 @@ function renderHome(root) {
   function loadRow(ld) {
     var trailerCount = ld.placements.filter(function (p) { var pr = getProfile(p.profileId); return !pr || pr.kind !== 'truck'; }).length;
     var stat = ld.status || 'prep';
-    var sub = [ld.address, ld.notes].filter(Boolean).join(' \u00b7 ');
+    var er = erpFor(ld), ep = er ? erpProgress(er) : null, row;
+    var files = [];
+    if ((ld.docs||[]).length) files.push(ld.docs.length+' doc'+(ld.docs.length===1?'':'s'));
+    if (ld.photos.length) files.push(ld.photos.length + ' photo' + (ld.photos.length > 1 ? 's' : ''));
+    var sub = [ld.address, ld.notes].concat(files).filter(Boolean).join(' \u00b7 ');
     var badges = [h('span',{class:'workflow-badge stage-'+workflowStage(ld)},[workflowLabel(ld)])];
+    // Where the trailers are in production, straight from the ERP, for whoever is not on the floor.
+    if (ep && ep.total && stat !== 'picked') {
+      badges.push(erpChip(er));
+      if (ep.ready && workflowStage(ld) <= 1) badges.push(h('span', { class: 'pill prepped' }, ['Ready to prep']));
+      else if (!ep.ready && erpWhereText(ep)) badges.push(h('span', { class: 'erpwhere' }, [erpWhereText(ep)]));
+    }
     if (isYard()) {
       var today = todayStr();
       var prepOverdue = !ld.prepped && ld.prepDate && ld.prepDate < today && ld.status !== 'ready' && ld.status !== 'picked';
@@ -1533,8 +1752,6 @@ function renderHome(root) {
     if (ld.custPickup) badges.push(h('span', { class: 'pill pickup' }, ['\ud83c\udfe0 Customer pickup']));
     if (ld.prepped && (stat === 'prep' || stat === 'open')) badges.push(h('span', { class: 'pill prepped' }, ['\u2705 Prepped']));
     if (ld.truckDate && stat !== 'picked') badges.push(h('span', { class: 'pill truck' }, ['\ud83d\ude9a ' + bookingStr(ld)]));
-    if ((ld.docs||[]).length) badges.push(h('span',{class:'pill'},[ld.docs.length+' document'+(ld.docs.length===1?'':'s')]));
-    if (ld.photos.length) badges.push(h('span', { class: 'pill' }, [ld.photos.length + ' photo' + (ld.photos.length > 1 ? 's' : '')]));
     var btns = null;
     if (!isYard()) {
       var sel = h('select', { class: 'statussel', title: 'Load status' }, ['open', 'prep', 'prepped', 'stack', 'ready', 'picked'].map(function (st) {
@@ -1548,6 +1765,8 @@ function renderHome(root) {
       });
       btns = h('div', { class: 'rowbtns' }, [
         sel,
+        h('button', { class: 'iconbtn morebtn', title: 'More: paperwork, truck, duplicate, delete', 'aria-label': 'More actions', onclick: function (e) { e.stopPropagation(); row.classList.toggle('open'); } }, ['\u22ef']),
+        h('div', { class: 'rowmore', onclick: function (e) { e.stopPropagation(); } }, [
         h('button',{class:'btn small',title:'Attach PDF paperwork to this load',onclick:function(e){e.stopPropagation();attachLoadDocuments(ld,e.currentTarget,function(){renderRoute();});}},['Upload documents']),
         stat === 'prep' ? h('button', { class: 'iconbtn', title: ld.prepped ? 'Un-mark prepped' : 'Mark as prepped', onclick: function (e) {
           e.stopPropagation(); ld.prepped = !ld.prepped; ld.updated = Date.now(); markDirty(); renderRoute();
@@ -1562,17 +1781,19 @@ function renderHome(root) {
             markDirty(); renderRoute();
           }, { okLabel: 'Delete', danger: true });
         } }, ['\u2715'])
+        ])
       ]);
     }
-    return h('div', { class: 'loadrow', 'data-tour-load': practiceSession ? 'true' : null, onclick: function () { go('editor', ld.id); } }, [
-      h('div', { class: 'lno' }, [ld.loadNo ? '#' + ld.loadNo : '(no #)', h('small', null, [ld.date || ''])]),
+    row = h('div', { class: 'loadrow', 'data-tour-load': practiceSession ? 'true' : null, onclick: function () { go('editor', ld.id); } }, [
+      h('div', { class: 'lno' }, [ld.loadNo ? '#' + ld.loadNo : '(no #)', h('small', { title: er && er.head.ship_date ? 'Planned ship date in the ERP' : 'Ship date' }, [er && er.head.ship_date ? 'Ships ' + erpShip(er.head.ship_date) : ld.date || ''])]),
       h('div', { class: 'lcust' }, [ld.customer || h('span', { style: 'color:var(--muted);font-weight:400' }, ['No customer']), sub ? h('small', null, [sub.slice(0, 90)]) : null]),
-      h('div', { class: 'lmeta' }, [trailerCount + ' trl'].concat(badges)),
+      h('div', { class: 'lmeta' }, [h('span', { class: 'ltrl' + (ep && ep.total && trailerCount > ep.total ? ' over' : ''), title: ep && ep.total ? 'Trailers placed on the stack sheet, out of how many the ERP order has' : 'Trailers placed on the stack sheet' }, [ep && ep.total ? trailerCount + ' of ' + ep.total + ' placed' : trailerCount + ' trl'])].concat(badges)),
       btns
     ]);
+    return row;
   }
   function section(title, rows, extraHead, emptyText) {
-    return h('div', { class: 'card boardsec' }, [
+    return h('div', { class: 'card boardsec' + (rows.length ? '' : ' empty') }, [
       h('div', { class: 'card-head' }, [h('h2', null, [title + (rows.length ? ' \u00b7 ' + rows.length : '')]), extraHead])
     ].concat(rows.length ? rows.map(loadRow) : [h('div', { class: 'boardempty' }, [emptyText || 'Nothing here'])]));
   }
@@ -1630,6 +1851,16 @@ function renderHome(root) {
       h('div',null,[h('h1',null,[isYard() ? 'Yard work' : 'Load dashboard']),h('p',{class:'sub'},['Prepare → Stack → Ship. Open a load to see its details and next step.'])]),
       h('div',{class:'viewtoggle'},[isYard()?null:h('button',{class:'btn primary',onclick:newLoad},['+ New load']),viewBtn('board',isYard()?'Daily view':'Overview'),viewBtn('cal','Schedule')])
     ]),
+    isYard() || currentHomeView==='cal' ? null : (function () {
+      var waiting = erp.loaded ? erpUnstarted() : [], done = waiting.filter(function (r) { return erpProgress(r).ready; }).length;
+      var canPrep = active.filter(function (l) { var r = erpFor(l); return r && workflowStage(l) <= 1 && erpProgress(r).ready; }).length;
+      return h('div', { class: 'erpstrip' }, [
+        h('span', { class: 'erp-age' }, [erpAgeText()]),
+        canPrep ? h('span', { class: 'pill prepped' }, [canPrep + (canPrep === 1 ? ' load is' : ' loads are') + ' fully built and can be prepped']) : null,
+        waiting.length ? h('button', { class: 'btn small', onclick: newLoad }, [waiting.length + ' ERP load' + (waiting.length === 1 ? '' : 's') + ' not started here' + (done ? ' \u00b7 ' + done + ' fully built' : '')]) : null,
+        h('button', { class: 'btn small ghost', title: 'Check the ERP again now', onclick: function () { syncErp(true); } }, ['\u21bb'])
+      ]);
+    })(),
     currentHomeView==='cal' && isYard()?h('p',{class:'sub'},['Schedule · view only. Browse upcoming prep, stacking and truck arrivals. Open a load for details; schedule changes are handled by the office.']):null,
     currentHomeView==='cal'?null:h('div',{class:'stage-summary'},stages.map(function(stage,i){return h('button',{class:'stage-tile stage-'+i,onclick:function(){changeHomeView('board');document.getElementById('stage-'+i).scrollIntoView({behavior:'smooth',block:'start'});}},[h('strong',null,[String(stage[1].length)]),h('span',null,[stage[0]])]);})),
     currentHomeView==='cal' ? renderCalendar() : h('div',{class:'workflow-stages'},stages.map(function(stage,i){
@@ -2381,6 +2612,7 @@ function renderEditor(root, ld) {
   }
   search.addEventListener('input', renderPalette);
   var left = h('div', { class: 'panel' }, [
+    isYard() ? null : h('details', { class: 'erp-left', open: 'open' }, [h('summary', null, ['On the order']), h('div', { class: 'erppanel', id: 'erpPanel' })]),
     h('h3', null, ['Library']),
     h('div', { class: 'palette-search' }, [search]),
     palList,
@@ -2523,6 +2755,7 @@ function renderEditor(root, ld) {
       ])
     ]),
     isYard() ? null : h('div', { class: 'insp-section' }, [h('h3', null, ['Selected']), selPanel]),
+    isYard() ? h('div', { class: 'insp-section' }, [h('h3', null, ['On the order']), h('div', { class: 'erppanel', id: 'erpPanel' })]) : null,
     h('div', { class: 'insp-section' }, [h('h3', null, ['On this load']), stackList]),
     h('div', { class: 'insp-section' }, [
       h('h3', null, ['Photos of the stack']),
@@ -3512,6 +3745,7 @@ function renderSelPanel(light) {
   ]));
 }
 function renderStackList() {
+  renderErpPanel();
   var sl = $('stackList');
   if (!sl || !editor) return;
   sl.innerHTML = '';

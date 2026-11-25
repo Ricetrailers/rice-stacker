@@ -1,0 +1,4 @@
+-- Applied to the rice-stacker Supabase project on 2026-11-25 (kept here for the record).
+-- erp_connection: erp_oauth, erp_oauth_state, erp_setup_key (service role only), erp_claim_refresh(), rs_model_map
+-- pro_max_model_map_and_pg_net: pg_net; FMHDM/FMHDMH 8222 -> Pierce Beam Deckover A, 8224 -> Pierce Beam Deckover B
+-- erp_load_cache: rs_erp_loads (what the ERP says about each load) and rs_erp_sync (last refresh), member read only

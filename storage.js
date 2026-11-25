@@ -23,6 +23,9 @@
       inviteMember: function(){return Promise.reject(new Error('Demo only. No email was sent.'));},
       createMember: function(){return Promise.reject(new Error('Preview only. No account was created.'));},
       setMemberPassword: function(){return Promise.reject(new Error('Preview only. No password was changed.'));},
+      erpLoads: function(){return Promise.resolve(JSON.parse(JSON.stringify(global.RS_MOCK_ERP||[])));},
+      erpSync: function(){return Promise.resolve({fresh:true});},
+      erpLoad: function(no){var r=(global.RS_MOCK_ERP||[]).filter(function(x){return x.load_no===no;})[0];return Promise.resolve(r?{found:true,row:r}:{found:false});},
       init: function () { return Promise.resolve({ user: { email: 'dev@local' } }); },
       signIn: function () { return Promise.resolve({}); },
       signOut: function () { return Promise.resolve(); },
@@ -100,6 +103,10 @@
 
     return {
       mock: false,
+      /* ERP (Metasystems) load list. rs_erp_loads is filled by the erp-load function; the app only reads it. */
+      erpLoads: function(){return sb.from('rs_erp_loads').select('*').then(function(r){if(r.error)throw r.error;return r.data||[];});},
+      erpSync: function(force){return sb.functions.invoke('erp-load',{body:{sync:true,force:!!force}}).then(function(r){if(r.error)throw r.error;return r.data||{};});},
+      erpLoad: function(no){return sb.functions.invoke('erp-load',{body:{load_no:String(no)}}).then(function(r){if(r.error)throw r.error;return r.data||{};});},
       tourStatus:function(){return sb.rpc('rs_tour_status').then(function(r){if(r.error)throw r.error;return r.data;});},
       completeTour:function(){return sb.rpc('rs_complete_tour').then(function(r){if(r.error)throw r.error;});},
       listMembers: function(){return teamRequest({action:'list'}).then(function(r){return r.members;});},
