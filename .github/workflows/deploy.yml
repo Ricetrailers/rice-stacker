@@ -1,0 +1,22 @@
+name: Publish to Netlify
+# Publishes the site/ folder to rice-stacker.netlify.app whenever the current branch changes.
+# Needs one repository secret: NETLIFY_AUTH_TOKEN (a Netlify personal access token).
+on:
+  push:
+    branches: [current]
+    paths: ['site/**', '.github/workflows/deploy.yml']
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Publish
+        env:
+          NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_AUTH_TOKEN }}
+          NETLIFY_SITE_ID: 30add429-fdd0-429a-94e3-4554c5f6491b
+        run: |
+          if [ -z "$NETLIFY_AUTH_TOKEN" ]; then
+            echo "NETLIFY_AUTH_TOKEN is not set on this repository yet. Nothing was published."
+            exit 0
+          fi
+          npx -y netlify-cli@17 deploy --prod --dir=site --message "GitHub ${GITHUB_SHA::7}"
