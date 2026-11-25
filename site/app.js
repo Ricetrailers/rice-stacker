@@ -1165,7 +1165,7 @@ function renderErpPanel() {
     ]));
   });
   if (missing.length > 1 && !isYard()) el.appendChild(h('div', { class: 'photoadd' }, [
-    h('button', { class: 'btn small primary', style: 'width:100%;justify-content:center', onclick: function () { missing.forEach(function (pr) { addPlacement(pr); }); toast(missing.length + ' trailers placed. Drag them into the stack.'); } }, ['Place all ' + missing.length + ' still to stack'])
+    h('button', { class: 'btn small primary', style: 'width:100%;justify-content:center', title: 'Puts the rest of the order on the sheet and stacks the load the way the crew stacked the closest past load', onclick: erpPlaceAndStack }, ['Place and stack the ' + missing.length + ' left'])
   ]));
   el.appendChild(h('details', { class: 'erpdetail' }, [
     h('summary', null, ['Trailer by trailer']),
@@ -1197,6 +1197,7 @@ function newLoad() {
     state.loads.unshift(ld);
     markDirty();
     go('editor', ld.id);
+    if ((r.trailers || []).some(function (t) { return t.profile_id && getProfile(t.profile_id); })) setTimeout(function () { if (editor && editor.ld === ld) erpPlaceAndStack(); }, 80);
   }
   function pdfBtn(label, onFile) {
     var b = h('button', { class: 'btn small ghost', style: 'width:100%;justify-content:center' }, [label]);
@@ -2646,7 +2647,7 @@ function renderEditor(root, ld) {
     tb('⧉ Duplicate', function () { duplicateSel(); }, null, 'Duplicate (Ctrl+D)'),
     tb('✕ Remove', function () { deleteSel(); }, null, 'Remove (Delete)'),
     h('div', { class: 'sep' }),
-    tb('⚡ Auto stack', function () { autoStack(); }, null, 'Automatically nest all trailers onto the rig'),
+    tb('⚡ Auto stack', function () { autoStack(); }, null, 'Stack the load the way the crew stacked the closest past load. With no past load to go by, nests them by the drawings.'),
     tb('📏 Measure', function () { toggleMeasureMode(); }, 'measureBtn', 'Measure between trailers or from the ground — click the number to set it and the trailer moves'),
     tb('⛶ Fit', function () { fitView(); }, null, 'Zoom to fit')
   ]);
@@ -3885,7 +3886,146 @@ function heightMap(prof, fh) {
   hmCache[key] = out;
   return out;
 }
-function autoStack() {
+/* ---------- learning from the loads the crew already stacked ----------
+   Nothing is trained or stored. Every time a load is auto stacked, the app looks at the loads saved in
+   Stacker, finds the one most like this load, and lays this load out the same way: same rig, same
+   columns, same flip on each layer, longer trailers where the crew put the longer ones. The exact
+   heights are then settled from the drawings so nothing overlaps. Each load the crew fixes and moves
+   on to stacking becomes one more example. */
+function stackExamples(exceptId) {
+  return state.loads.map(function (l) {
+    if (l.id === exceptId) return null;
+    var tr = [], truck = null;
+    (l.placements || []).forEach(function (pl) {
+      var pr = getProfile(pl.profileId);
+      if (!pr) return;
+      if (pr.kind === 'truck') { if (!truck) truck = { pl: pl, prof: pr }; }
+      else tr.push({ pl: pl, prof: pr });
+    });
+    if (tr.length < 2) return null;
+    var stage = workflowStage(l);
+    // A layout the app made itself only counts once the crew has moved it on to stacking or shipped it.
+    if (stage < 3 && tr.every(function (t) { return t.pl.auto; })) return null;
+    return { ld: l, trailers: tr, truck: truck, weight: stage >= 3 ? 3 : 1 };
+  }).filter(Boolean);
+}
+function stackPlan(ld, trailers, carrier) {
+  var wantTruck = !!carrier || (ld.type || 'stack') === 'semi';
+  var ex = stackExamples(ld.id).filter(function (e) { return !!e.truck === wantTruck; });
+  if (!ex.length) return null;
+  var n = trailers.length, want = {};
+  trailers.forEach(function (t) { want[t.prof.id] = (want[t.prof.id] || 0) + 1; });
+  var lens = trailers.map(function (t) { return t.prof.width; }).sort(function (x, y) { return y - x; });
+  var best = null;
+  ex.forEach(function (e) {
+    var have = {}, m = e.trailers.length, same = 0;
+    e.trailers.forEach(function (t) { have[t.prof.id] = (have[t.prof.id] || 0) + 1; });
+    Object.keys(want).forEach(function (id) { same += Math.min(want[id], have[id] || 0); });
+    var sim = same / Math.max(n, m);
+    // How alike the two loads are by length, longest against longest. Length decides how a load stacks.
+    var other = e.trailers.map(function (t) { return t.prof.width; }).sort(function (x, y) { return y - x; });
+    var diff = 0, tot = 0;
+    for (var q = 0; q < Math.max(n, m); q++) { var x1 = lens[q] || 0, x2 = other[q] || 0; diff += Math.abs(x1 - x2); tot += Math.max(x1, x2); }
+    var shape = tot ? 1 - diff / tot : 0;
+    var score = 0.65 * shape + 0.3 * sim + 0.015 * e.weight + (carrier && e.truck && e.truck.prof.id === carrier.prof.id ? 0.02 : 0);
+    if (!best || score > best.score || (score === best.score && (e.ld.updated || 0) > (best.e.ld.updated || 0))) best = { e: e, sim: sim, shape: shape, score: score, m: m };
+  });
+  // With no rig to anchor it, a layout only carries over to a load that is close to it.
+  if (!wantTruck && best.sim === 0 && best.shape < 0.85) return null;
+  // The example's positions, grouped into the columns the crew built.
+  var slots = best.e.trailers.map(function (t) { return { cx: t.pl.cx, cy: t.pl.cy, fh: !!t.pl.fh, id: t.prof.id, w: t.prof.width, col: 0 }; })
+    .sort(function (a, b) { return a.cx - b.cx; });
+  for (var i = 1; i < slots.length; i++) slots[i].col = slots[i - 1].col + (slots[i].cx - slots[i - 1].cx > 100 ? 1 : 0);
+  slots.sort(function (a, b) { return (a.cy - b.cy) || (a.cx - b.cx); });
+  if (slots.length > n) slots = slots.slice(0, n);
+  // More trailers than the example had: keep building up the shorter column, flipping every layer.
+  while (slots.length < n) {
+    var cols = {};
+    slots.forEach(function (sl) { (cols[sl.col] = cols[sl.col] || []).push(sl); });
+    var pick = Object.keys(cols).sort(function (a, b) { return cols[a].length - cols[b].length || b - a; })[0];
+    var top = cols[pick][cols[pick].length - 1];
+    slots.push({ cx: top.cx, cy: top.cy + 18, fh: !top.fh, id: null, w: top.w - 0.01, col: top.col });
+  }
+  // Longest trailers take the spots that held the longest, column by column from the bottom, so trailers
+  // of one length stay together and nest the way the crew stacks them.
+  var colLong = {}, ft = function (w) { return Math.round(w / 12); };   // length to the nearest foot
+  slots.forEach(function (sl) { colLong[sl.col] = Math.max(colLong[sl.col] || 0, ft(sl.w)); });
+  var ranked = slots.slice().sort(function (a, b) { return (ft(b.w) - ft(a.w)) || (colLong[b.col] - colLong[a.col]) || (a.col - b.col) || (a.cy - b.cy); });
+  var byLen = trailers.slice().sort(function (a, b) { return (ft(b.prof.width) - ft(a.prof.width)) || a.prof.name.localeCompare(b.prof.name); });
+  ranked.forEach(function (sl, k) { sl.t = byLen[k]; });
+  // Among trailers of the same length, put each model where that model sat in the example.
+  for (var u = 0; u < ranked.length; u++) {
+    if (!ranked[u].t || ranked[u].t.prof.id === ranked[u].id) continue;
+    for (var v = 0; v < ranked.length; v++) {
+      if (v === u || !ranked[v].t || ranked[v].t.prof.id === ranked[v].id) continue;
+      if (ft(ranked[v].t.prof.width) !== ft(ranked[u].t.prof.width)) continue;
+      if (ranked[v].t.prof.id === ranked[u].id) { var sw = ranked[u].t; ranked[u].t = ranked[v].t; ranked[v].t = sw; break; }
+    }
+  }
+  // Heights come from how far apart the crew actually sets one trailer on another, not from the
+  // outlines alone: stacked trailers nest closer than their drawings suggest.
+  var gaps = {}, bases = {};
+  var note = function (table, key, val) { (table[key] = table[key] || []).push(val); };
+  var mid = function (list) { var a = list.slice().sort(function (x, y) { return x - y; }); return a[Math.floor((a.length - 1) / 2)]; };
+  ex.forEach(function (e) {
+    var cs = e.trailers.map(function (t) { return { cx: t.pl.cx, cy: t.pl.cy, p: t.prof, col: 0 }; }).sort(function (a, b) { return a.cx - b.cx; });
+    for (var c = 1; c < cs.length; c++) cs[c].col = cs[c - 1].col + (cs[c].cx - cs[c - 1].cx > 100 ? 1 : 0);
+    cs.sort(function (a, b) { return (a.col - b.col) || (a.cy - b.cy); });
+    cs.forEach(function (it, c) {
+      var under = c && cs[c - 1].col === it.col ? cs[c - 1] : null;
+      if (!under) { note(bases, it.p.id + '@' + Math.round(it.cx / 150), it.cy - it.p.height / 2); return; }
+      var g = it.cy - under.cy;
+      if (g <= 0 || g > 80) return;
+      note(gaps, under.p.id + '>' + it.p.id, g);
+      note(gaps, 'ft' + ft(under.p.width) + '>' + ft(it.p.width), g);
+    });
+  });
+  var colsNow = {};
+  slots.forEach(function (sl) { if (sl.t) (colsNow[sl.col] = colsNow[sl.col] || []).push(sl); });
+  Object.keys(colsNow).forEach(function (c) {
+    var list = colsNow[c].sort(function (a, b) { return a.cy - b.cy; }), prev = null;
+    list.forEach(function (sl) {
+      var pr = sl.t.prof, was = sl.id ? getProfile(sl.id) : null;
+      if (!prev) {
+        // Bottom of a column: where this model has sat on the deck or ground before, else the example's bottom edge.
+        var b = bases[pr.id + '@' + Math.round(sl.cx / 150)];
+        sl.py = pr.id === sl.id ? sl.cy : b ? mid(b) + pr.height / 2 : was ? sl.cy - was.height / 2 + pr.height / 2 : null;
+      } else {
+        var g = gaps[prev.t.prof.id + '>' + pr.id] || gaps['ft' + ft(prev.t.prof.width) + '>' + ft(pr.width)];
+        sl.py = g && prev.py != null ? prev.py + mid(g) : null;   // no example of this pair: settle it from the drawings
+      }
+      prev = sl;
+    });
+  });
+  var order = [];
+  slots.forEach(function (sl) { if (sl.t) order.push({ t: sl.t, cx: sl.cx, fh: sl.fh, cy: sl.py }); });
+  return {
+    order: order, from: best.e.ld, same: best.sim === 1 && best.m === n, examples: ex.length,
+    truck: best.e.truck ? { prof: best.e.truck.prof, cx: best.e.truck.pl.cx, cy: best.e.truck.pl.cy, fh: !!best.e.truck.pl.fh } : null
+  };
+}
+/* Put every trailer the ERP order still needs on the sheet, then stack the load the way the crew does. */
+function erpPlaceAndStack() {
+  if (!editor || isYard()) return;
+  var ld = editor.ld, r = erpFor(ld);
+  if (!r) return;
+  var placed = {}, add = [];
+  ld.placements.forEach(function (pl) { placed[pl.profileId] = (placed[pl.profileId] || 0) + 1; });
+  (r.trailers || []).forEach(function (t) {
+    var pr = t.profile_id ? getProfile(t.profile_id) : null;
+    if (!pr) return;
+    if (placed[pr.id] > 0) { placed[pr.id]--; return; }
+    add.push(pr);
+  });
+  if (!add.length && !ld.placements.length) { toast('None of the trailers on this order has a stack drawing yet', true); return; }
+  snapshot();
+  add.forEach(function (pr, i) {
+    ld.placements.push({ id: uid(), profileId: pr.id, cx: pr.width / 2 + (i % 6) * 18, cy: pr.height / 2 + 62 + (i % 6) * 18, rot: 0, fh: false, fv: false });
+  });
+  autoStack({ noSnapshot: true });
+}
+function autoStack(opts) {
+  opts = opts || {};
   if (!editor) return;
   var trailers = [], carrier = null;
   editor.ld.placements.forEach(function (pl) {
@@ -3895,7 +4035,14 @@ function autoStack() {
     else if (prof.kind !== 'truck') trailers.push({ pl: pl, prof: prof });
   });
   if (!trailers.length) { toast('Nothing to stack — add some trailers first'); return; }
-  snapshot();
+  if (!opts.noSnapshot) snapshot();
+  // Lay it out like the closest load the crew has stacked before, when there is one.
+  var plan = opts.plain ? null : stackPlan(editor.ld, trailers, carrier);
+  if (plan && plan.truck && !carrier) {
+    var rig = { id: uid(), profileId: plan.truck.prof.id, cx: plan.truck.cx, cy: plan.truck.cy, rot: 0, fh: plan.truck.fh, fv: false };
+    editor.ld.placements.push(rig);
+    carrier = { pl: rig, prof: plan.truck.prof };
+  }
   var OFF = 300, BINS = 2400;   // world x from -300 to 2100
   var S = new Float64Array(BINS); // ground = 0
   var spanMin = 0, spanMax = 800;
@@ -3921,9 +4068,10 @@ function autoStack() {
   var HCAP = 162, COLGAP = 4;
   var tooLong = [], overCap = false;
 
-  function tryPlace(t, lo0, hi0, prefFh, step) {
+  function tryPlace(t, lo0, hi0, prefFh, step, onlyFh) {
     var best = null;
     [false, true].forEach(function (fh) {
+      if (onlyFh != null && fh !== onlyFh) return;
       var hm = heightMap(t.prof, fh);
       var half = hm.w / 2;
       var lo = lo0 + half, hi = hi0 - half;
@@ -3957,6 +4105,7 @@ function autoStack() {
     t.pl.fh = best.fh;
     t.pl.fv = false;
     t.pl.rot = 0;
+    if (plan) t.pl.auto = 1; else delete t.pl.auto;
     for (var b4 = 0; b4 < best.hm.n; b4++) {
       if (best.hm.T[b4] < -1e8) continue;
       var wb4 = Math.round(t.pl.cx + (b4 - best.half)) + OFF;
@@ -3964,6 +4113,35 @@ function autoStack() {
     }
   }
 
+  if (plan) {
+    // Bottom to top: each trailer goes to the spot and flip the example used, then settles onto what is under it.
+    var topMost = 0, missed = 0, wasTop = 0;
+    // How tall the example itself reads on the sheet, so a new load is judged against what the crew shipped.
+    (plan.from.placements || []).forEach(function (pl) {
+      var pr = getProfile(pl.profileId);
+      if (!pr || pr.kind === 'truck') return;
+      var hmw = heightMap(pr, !!pl.fh);
+      for (var z2 = 0; z2 < hmw.n; z2++) if (hmw.T[z2] > -1e8 && pl.cy + hmw.T[z2] > wasTop) wasTop = pl.cy + hmw.T[z2];
+    });
+    plan.order.forEach(function (o) {
+      var half = o.t.prof.width / 2, b = null;
+      if (o.cy != null) {
+        var hm0 = heightMap(o.t.prof, o.fh), tm = -1e9;
+        for (var z = 0; z < hm0.n; z++) if (hm0.T[z] > -1e8 && hm0.T[z] > tm) tm = hm0.T[z];
+        b = { cx: o.cx, cy: o.cy, fh: o.fh, top: o.cy + tm, hm: hm0, half: hm0.w / 2 };
+      } else b = tryPlace(o.t, o.cx - half - 8, o.cx + half + 8, o.fh, 2, o.fh) || tryPlace(o.t, spanMin, spanMax, o.fh, 4);
+      if (!b) { missed++; return; }
+      commit(o.t, b);
+      if (b.top > topMost) topMost = b.top;
+    });
+    afterMutate();
+    fitView();
+    var like = plan.from.loadNo ? 'load #' + plan.from.loadNo : 'an earlier load';
+    if (missed) toast(missed + ' trailer' + (missed > 1 ? 's' : '') + ' could not be placed. Stack the rest by hand.', true);
+    else if (topMost > HCAP + 0.001 && topMost > wasTop + 3) toast('Stacked like ' + like + ', but it comes out ' + Math.round(topMost - Math.max(wasTop, HCAP)) + '" taller than that load did. Rework it before it ships.', true);
+    else toast(plan.same ? 'Stacked the same way as ' + like + ' (same trailers). Check it over.' : 'Stacked the way the crew did ' + like + ', the closest of ' + plan.examples + ' past loads. Check it and adjust.');
+    return;
+  }
   // widest first, identical models grouped — bigger on the bottom, small ones top off a stack
   trailers.sort(function (a, b) { return (b.prof.width - a.prof.width) || a.prof.name.localeCompare(b.prof.name); });
   var remaining = trailers.slice();
