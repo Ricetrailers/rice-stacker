@@ -1,0 +1,1 @@
+Rice Stacker, published from GitHub branch current on 2026-11-25. ERP loads, learned stacking, auto stacked tag.
