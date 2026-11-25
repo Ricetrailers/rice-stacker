@@ -100,10 +100,19 @@ var route = { view: 'home', loadId: null };
 var pathCache = {};         // profileId -> svg path d
 
 function defaultState() {
-  var s = { v: 1, seedRev: seed.rev || 0, profiles: seed.profiles.slice(), loads: [], folders: [], keys: {} };
+  var s = { v: 1, seedRev: seed.rev || 0, profiles: seed.profiles.slice(), loads: [], folders: [], keys: {}, tireStyles: [], roles: {} };
   migrateGroups(s);
   return s;
 }
+/* ---------- roles: admin (full control) vs yard (view + photos + tires) ---------- */
+var currentUserEmail = '';
+var viewAsYard = false;   // admin-only preview of the yard experience
+function realRole() { return RS_STORAGE.mock ? (RS_STORAGE.previewRole || 'admin') : (RS_STORAGE.role || 'yard'); }
+function userRole() {
+  var r = realRole();
+  return (r === 'admin' && viewAsYard) ? 'yard' : r;
+}
+function isYard() { return userRole() === 'yard'; }
 /* ---------- library groups ---------- */
 function guessGroup(p) {
   var n = (p.name || '').toLowerCase();
@@ -467,6 +476,7 @@ var lastSavedAt = null;
 var dirtySince = null;
 var manualSave = false;
 function markDirty() {
+  if (practiceSession) return;
   dirty = true;
   if (!dirtySince) dirtySince = Date.now();
   updateSaveChip();
@@ -517,7 +527,7 @@ function snapOf(state0) {
   var s = { profiles: {}, loads: {}, folders: JSON.stringify(state0.folders || []), settings: {} };
   state0.profiles.forEach(function (p) { s.profiles[p.id] = JSON.stringify(p); });
   state0.loads.forEach(function (l) { s.loads[l.id] = JSON.stringify(l); });
-  ['keys', 'seedRev', 'groupsRev'].forEach(function (k) { s.settings[k] = JSON.stringify(state0[k] === undefined ? null : state0[k]); });
+  ['keys', 'seedRev', 'groupsRev', 'tireStyles', 'tireTINs', 'roles'].forEach(function (k) { s.settings[k] = JSON.stringify(state0[k] === undefined ? null : state0[k]); });
   return s;
 }
 function computeDiff() {
@@ -536,22 +546,35 @@ function computeDiff() {
   Object.keys(snap.loads).forEach(function (id) { if (!seenL[id]) diff.loads.remove.push(id); });
   var foldersNow = JSON.stringify(state.folders || []);
   if (foldersNow !== snap.folders) diff.folders = (state.folders || []).slice();
-  ['keys', 'seedRev', 'groupsRev'].forEach(function (k) {
+  ['keys', 'seedRev', 'groupsRev', 'tireStyles', 'tireTINs', 'roles'].forEach(function (k) {
     var v = JSON.stringify(state[k] === undefined ? null : state[k]);
     if (v !== snap.settings[k]) diff.settings[k] = state[k] === undefined ? null : state[k];
   });
   return diff;
 }
+var queuedSave = false;   // a save was requested while another was in flight
 function saveNow() {
+  if (practiceSession) return;
   if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
-  if (!dirty || saving) return;
+  if (!dirty) return;
+  if (saving) { queuedSave = true; return; }   // don't drop it — run again when this one lands
   state.updatedAt = Date.now();
   saving = true; updateSaveChip();
+  var snapAtStart = snapOf(state);   // exactly what this save writes
   var diff = computeDiff();
   RS_STORAGE.saveDiff(diff).then(function () {
-    saving = false; dirty = false; dirtySince = null;
+    saving = false;
     lastSavedAt = Date.now();
-    lastSavedSnap = snapOf(state);
+    // Credit only what was actually written. Edits made while the save was in
+    // flight stay in the diff, so they can never be silently marked as saved.
+    lastSavedSnap = snapAtStart;
+    var d2 = computeDiff();
+    var more = queuedSave || d2.profiles.upsert.length || d2.profiles.remove.length ||
+               d2.loads.upsert.length || d2.loads.remove.length ||
+               d2.folders !== null || Object.keys(d2.settings).length;
+    queuedSave = false;
+    if (more) { dirty = true; updateSaveChip(); setTimeout(saveNow, 50); return; }
+    dirty = false; dirtySince = null;
     updateSaveChip();
     if (manualSave) { manualSave = false; toast('✓ All changes saved'); }
   }).catch(function (err) {
@@ -582,7 +605,8 @@ function showAuthGate(msg) {
   $('authBtn').onclick = function () {
     $('authMsg').textContent = '';
     $('authBtn').disabled = true;
-    RS_STORAGE.signIn($('authEmail').value.trim(), $('authPass').value).then(function () {
+    RS_STORAGE.signIn($('authEmail').value.trim(), $('authPass').value).then(function (d) {
+      currentUserEmail = String((d && d.user && d.user.email) || $('authEmail').value.trim()).toLowerCase();
       $('authBtn').disabled = false;
       gate.hidden = true;
       document.querySelector('.app').style.display = '';
@@ -596,7 +620,12 @@ function showAuthGate(msg) {
 }
 function startApp() {
   Promise.all([
-    fetch('seed.json').then(function (r) { return r.ok ? r.json() : { rev: 0, profiles: [] }; }).catch(function () { return { rev: 0, profiles: [] }; }),
+    (function () {
+      if (!RS_STORAGE.mock) return Promise.resolve({rev:0,profiles:[]});
+      var el = document.getElementById('seedData');
+      if (el) { try { return Promise.resolve(JSON.parse(el.textContent)); } catch (e) {} }
+      return fetch('seed.json').then(function (r) { return r.ok ? r.json() : { rev: 0, profiles: [] }; }).catch(function () { return { rev: 0, profiles: [] }; });
+    })(),
     RS_STORAGE.loadAll()
   ]).then(function (res) {
     seed = res[0];
@@ -608,24 +637,28 @@ function startApp() {
       folders: data.folders || [],
       seedRev: data.settings && data.settings.seedRev != null ? data.settings.seedRev : 0,
       groupsRev: data.settings && data.settings.groupsRev != null ? data.settings.groupsRev : 0,
-      keys: (data.settings && data.settings.keys) || {}
+      keys: (data.settings && data.settings.keys) || {},
+      tireStyles: (data.settings && data.settings.tireStyles) || [],
+      tireTINs: (data.settings && data.settings.tireTINs) || {},
+      roles: (data.settings && data.settings.roles) || {}
     };
     lastSavedSnap = snapOf(state);
-    var changed = mergeSeed(state);
-    if (migrateGroups(state)) changed = true;
+    var changed = RS_STORAGE.mock && mergeSeed(state);
+    if (!isYard() && migrateGroups(state)) changed = true;
     if (changed) markDirty();
     renderRoute();
+    // Learning tools are optional and opened through Help.
   }).catch(function (err) {
     toast('Couldn’t load data' + (err && err.message ? ': ' + err.message : '') + ' — check config.js and your connection', true);
-    state = defaultState();
-    renderRoute();
+    showAuthGate('Could not load your account. ' + (err.message || 'Please sign in again.'));
   });
 }
 function boot() {
   state = defaultState();
   renderRoute();     // paint immediately; data arrives right behind
   RS_STORAGE.init().then(function (res) {
-    if (res.user) startApp();
+    if (RS_STORAGE.passwordSetup) { window.RS_SHOW_PASSWORD_SETUP(); return; }
+    if (res.user) { currentUserEmail = String(res.user.email || '').toLowerCase(); startApp(); }
     else showAuthGate();
   }).catch(function () { showAuthGate('Couldn’t reach the server — check config.js'); });
 }
@@ -717,10 +750,12 @@ function importBackup() {
 
 /* ---------- routing ---------- */
 function go(view, loadId) {
+  if (isYard() && view === 'library') { toast('Your account can view loads and add photos & tire info'); return; }
   route = { view: view, loadId: loadId || null, profileId: route.profileId };
   renderRoute();
 }
 function goDraw(profileId) {
+  if (isYard()) { toast('Your account can view loads and add photos & tire info'); return; }
   route = { view: 'draw', loadId: null, profileId: profileId };
   renderRoute();
 }
@@ -803,6 +838,8 @@ function renderTabs() {
       function reallyClose() {
         delete drawCache[id];
         openDrawTabs = openDrawTabs.filter(function (x) { return x !== id; });
+        // a brand-new model that was never drawn or saved leaves no husk behind
+        if (p && !p.polylines.length) state.profiles = state.profiles.filter(function (x) { return x.id !== id; });
         if (active) go('library'); else renderTabs();
       }
       if (dc && dc.dirty) confirmModal('Discard unsaved drawing changes to "' + p.name + '"?', reallyClose, { okLabel: 'Discard', danger: true });
@@ -814,10 +851,25 @@ function renderRoute() {
   stashCurrentView();
   if (window.__drawCleanup) window.__drawCleanup();
   document.querySelectorAll('.palpreview').forEach(function (el) { el.remove(); });
+  var badge=$('roleBadge');
+  if(!badge){badge=h('span',{id:'roleBadge',class:'pill'});document.querySelector('header.top').appendChild(badge);}
+  badge.textContent=(RS_STORAGE.mock?'Demo · ':'')+(viewAsYard?'Yard preview':realRole()==='admin'?'✓ Admin':realRole()==='user'?'User':'Yard');
   var v = $('view');
   v.innerHTML = '';
   $('btnPrint').hidden = route.view !== 'editor';
   $('btnSave').hidden = false;
+  if ($('btnLibrary')) $('btnLibrary').hidden = isYard();
+  var yv = $('btnYardView');
+  if (yv) {
+    yv.hidden = realRole() !== 'admin';
+    yv.textContent = viewAsYard ? '\ud83d\udc41 Exit yard view' : '\ud83d\udc41 Yard view';
+    yv.classList.toggle('primary', viewAsYard);
+    yv.onclick = function () {
+      viewAsYard = !viewAsYard;
+      toast(viewAsYard ? 'Showing what yard accounts see \u2014 hit the button again to switch back' : 'Back to admin view');
+      renderRoute();
+    };
+  }
   editor = null;
   if (route.view === 'home') { renderHome(v); }
   else if (route.view === 'library') { renderLibrary(v); }
@@ -843,81 +895,872 @@ function nextLoadNo() {
   state.loads.forEach(function (l) { var n = parseInt(l.loadNo, 10); if (isFinite(n) && n > mx) mx = n; });
   return mx ? String(mx + 1) : '';
 }
+function icimDate(s0) {
+  var m = String(s0).match(/^(\d{1,2})-([A-Z]{3})-(\d{2,4})$/i);
+  if (!m) return '';
+  var mo = { JAN:1, FEB:2, MAR:3, APR:4, MAY:5, JUN:6, JUL:7, AUG:8, SEP:9, OCT:10, NOV:11, DEC:12 }[m[2].toUpperCase()];
+  if (!mo) return '';
+  var y = +m[3]; if (y < 100) y += 2000;
+  return y + '-' + String(mo).padStart(2, '0') + '-' + String(m[1]).padStart(2, '0');
+}
+function pdfLines(file) {
+  return file.arrayBuffer().then(function (ab) {
+    return pdfjsLib.getDocument({ data: ab }).promise;
+  }).then(function (doc) {
+    var lines = [];
+    var chain = Promise.resolve();
+    for (var p = 1; p <= doc.numPages; p++) {
+      (function (pn) {
+        chain = chain.then(function () { return doc.getPage(pn); })
+          .then(function (pg) { return pg.getTextContent(); })
+          .then(function (tc) {
+            var rows = {};
+            tc.items.forEach(function (it) {
+              if (!it.str || !it.str.trim()) return;
+              var y = Math.round(it.transform[5] / 2) * 2;
+              (rows[y] = rows[y] || []).push({ x: it.transform[4], s: it.str });
+            });
+            Object.keys(rows).map(Number).sort(function (a, b) { return b - a; }).forEach(function (y) {
+              lines.push(rows[y].sort(function (a, b) { return a.x - b.x; }).map(function (i) { return i.s; }).join(' ').replace(/\s+/g, ' ').trim());
+            });
+          });
+      })(p);
+    }
+    return chain.then(function () { return lines; });
+  });
+}
+function parsePickList(file) {
+  return pdfLines(file).then(function (lines) {
+    var out = { loadNo: '', customer: '', date: '', items: [] };
+    lines.forEach(function (ln) {
+      var m;
+      if (!out.loadNo && (m = ln.match(/^Load\s*#\s*(\S+)/i))) out.loadNo = m[1];
+      else if (!out.customer && (m = ln.match(/^Customer\s*Name\s+(.+)/i))) out.customer = m[1].trim();
+      else if (!out.date && (m = ln.match(/Load\s*Date\s+(\d{1,2}-[A-Za-z]{3}-\d{2,4})/))) out.date = icimDate(m[1]);
+      else if (!/PICK LIST|Page\s*:|Loaded By/i.test(ln) && (m = ln.match(/^([A-Z0-9][A-Z0-9\-\.\/]{1,15})\s+(.+?)\s+(\d+)\s*[_\W]*$/))) {
+        if (!/^(PART|LOAD|CUSTOMER|LOC|PAGE|QUANTITY)$/i.test(m[1]) && m[2].length > 2) {
+          out.items.push({ part: m[1], desc: m[2].trim(), qty: +m[3] });
+        }
+      }
+    });
+    return out;
+  });
+}
+function uploadDoc(ld, file, label, cb) {
+  var id = uid();
+  var path = 'loads/' + ld.id + '/docs/' + id + '.pdf';
+  RS_STORAGE.uploadPhoto(path, file, 'application/pdf').then(function () {
+    if (!ld.docs) ld.docs = [];
+    ld.docs.push({ id: id, name: label || file.name || 'document.pdf', file: path, ts: Date.now() });
+    ld.updated = Date.now(); markDirty();
+    if (cb) cb(true);
+  }).catch(function (e) {
+    toast('Couldn\u2019t upload ' + (label || 'PDF') + (e && e.message ? ': ' + e.message : ''), true);
+    if (cb) cb(false);
+  });
+}
+function attachLoadDocuments(ld, button, refresh) {
+  if(isYard())return;
+  var input=h('input',{type:'file',accept:'application/pdf,.pdf',multiple:true,style:'display:none'});
+  input.addEventListener('change',function(){
+    var files=Array.from(input.files||[]);input.remove();if(!files.length)return;
+    var original=button.textContent;button.disabled=true;button.textContent='Uploading…';
+    var uploaded=0;
+    files.reduce(function(chain,file){return chain.then(function(){
+      if(!/\.pdf$/i.test(file.name)){toast('Please select PDF documents.',true);return;}
+      return new Promise(function(resolve){uploadDoc(ld,file,file.name,function(ok){
+        if(!ok){resolve();return;}uploaded++;
+        if(!(ld.items||[]).length){parsePickList(file).then(function(out){if(out.items.length&&!(ld.items||[]).length){ld.items=out.items;ld.updated=Date.now();markDirty();}}).catch(function(){}).then(resolve);}
+        else resolve();
+      });});
+    });},Promise.resolve()).finally(function(){button.disabled=false;button.textContent=original;if(uploaded)toast(uploaded+' document'+(uploaded===1?'':'s')+' attached to '+(ld.loadNo?'#'+ld.loadNo:'load'));refresh();});
+  });
+  input.addEventListener('cancel',function(){input.remove();});
+  document.body.appendChild(input);input.click();
+}
 function newLoad() {
-  var ld = { id: uid(), loadNo: nextLoadNo(), customer: '', date: todayStr(), notes: '', placements: [], photos: [], tires: [], created: Date.now(), updated: Date.now() };
-  state.loads.unshift(ld);
-  markDirty();
-  go('editor', ld.id);
+  var cust = h('input', { placeholder: 'Customer / destination', style: 'width:100%' });
+  var addr = h('textarea', { rows: 2, placeholder: 'Address', style: 'width:100%' });
+  var no = h('input', { value: nextLoadNo(), style: 'width:100%' });
+  var typeSel = h('select', { style: 'width:100%;padding:8px;border-radius:7px;border:1px solid var(--line);background:var(--panel);color:var(--ink);font-size:14px' }, [
+    h('option', { value: 'stack' }, ['Stack']),
+    h('option', { value: 'semi' }, ['Semi'])
+  ]);
+  var pickupCb = h('input', { type: 'checkbox', style: 'width:18px;height:18px' });
+  var msg = h('div', { style: 'color:var(--bad);font-size:12.5px;min-height:16px' });
+  var scrim = h('div', { class: 'modal-scrim' });
+  var pending = { items: null, shipDate: '', pickFile: null, proFile: null };
+  function pdfBtn(label, onFile) {
+    var b = h('button', { class: 'btn small ghost', style: 'width:100%;justify-content:center' }, [label]);
+    b.addEventListener('click', function () {
+      var inp = h('input', { type: 'file', accept: 'application/pdf', style: 'display:none' });
+      inp.addEventListener('change', function () { if (inp.files[0]) onFile(inp.files[0], b); });
+      document.body.appendChild(inp); inp.click(); setTimeout(function () { inp.remove(); }, 60000);
+    });
+    return b;
+  }
+  var pickBtn = pdfBtn('\ud83d\udcce Import ICIM pick list (PDF)', function (f, b) {
+    b.textContent = 'Reading\u2026';
+    parsePickList(f).then(function (out) {
+      pending.pickFile = f;
+      pending.items = out.items;
+      pending.shipDate = out.date || '';
+      if (out.loadNo) no.value = out.loadNo;
+      if (out.customer && !cust.value.trim()) cust.value = out.customer;
+      b.textContent = '\u2705 ' + (f.name || 'Pick list') + ' \u2014 ' + out.items.length + ' items' + (out.loadNo ? ' \u00b7 load #' + out.loadNo : '');
+      msg.textContent = '';
+    }).catch(function () {
+      pending.pickFile = f; pending.items = null;
+      b.textContent = '\u26a0 Attached (couldn\u2019t read details): ' + (f.name || 'pick list');
+    });
+  });
+  var proBtn = pdfBtn('\ud83d\udcce Attach pro forma invoice (PDF)', function (f, b) {
+    pending.proFile = f;
+    b.textContent = '\u2705 ' + (f.name || 'Pro forma attached');
+  });
+  function create() {
+    if (!cust.value.trim()) { msg.textContent = 'Customer name is required'; cust.focus(); return; }
+    if (!addr.value.trim()) { msg.textContent = 'Address is required'; addr.focus(); return; }
+    scrim.remove();
+    var ld = { id: uid(), loadNo: no.value.trim(), customer: cust.value.trim(), address: addr.value.trim(), date: pending.shipDate || todayStr(), notes: '', placements: [], photos: [], tires: [], items: pending.items || [], docs: [], status: 'open', prepped: false, type: typeSel.value, custPickup: !!pickupCb.checked, truckCo: '', truckDate: '', truckTime: '', prepDate: '', prepTime: '', stackDate: '', stackTime: '', created: Date.now(), updated: Date.now() };
+    state.loads.unshift(ld);
+    markDirty();
+    if (pending.pickFile) uploadDoc(ld, pending.pickFile, 'ICIM pick list', function () { renderDocs(); });
+    if (pending.proFile) uploadDoc(ld, pending.proFile, 'Pro forma invoice', function () { renderDocs(); });
+    go('editor', ld.id);
+  }
+  [cust, no].forEach(function (el) {
+    el.addEventListener('keydown', function (e) { if (e.key === 'Enter') create(); if (e.key === 'Escape') scrim.remove(); e.stopPropagation(); });
+  });
+  addr.addEventListener('keydown', function (e) { if (e.key === 'Escape') scrim.remove(); e.stopPropagation(); });
+  function lbl(t) { return h('label', { style: 'display:block;font:600 10.5px/1.8 Barlow,sans-serif;letter-spacing:.09em;text-transform:uppercase;color:var(--muted)' }, [t]); }
+  scrim.appendChild(h('div', { class: 'modal small' }, [
+    h('div', { class: 'modal-head' }, [
+      h('h2', { style: 'font-size:17px' }, ['New load']),
+      h('button', { class: 'iconbtn', onclick: function () { scrim.remove(); } }, ['\u2715'])
+    ]),
+    h('div', { class: 'modal-body' }, [
+      h('div', { style: 'display:flex;flex-direction:column;gap:10px' }, [
+        pickBtn,
+        proBtn,
+        h('div', { style: 'display:flex;gap:10px' }, [
+          h('div', { style: 'flex:1' }, [lbl('Load #'), no]),
+          h('div', { style: 'flex:1' }, [lbl('Type'), typeSel])
+        ]),
+        h('label', { style: 'display:flex;align-items:center;gap:8px;font-size:14px;cursor:pointer' }, [
+          pickupCb, 'Customer pickup \u2014 they\u2019re bringing their own truck'
+        ]),
+        h('div', null, [lbl('Customer / destination *'), cust]),
+        h('div', null, [lbl('Address *'), addr]),
+        msg
+      ])
+    ]),
+    h('div', { class: 'modal-foot' }, [
+      h('button', { class: 'btn', onclick: function () { scrim.remove(); } }, ['Cancel']),
+      h('button', { class: 'btn primary', onclick: create }, ['Start stacking'])
+    ])
+  ]));
+  document.body.appendChild(scrim);
+  setTimeout(function () { cust.focus(); }, 0);
 }
 function duplicateLoad(src) {
   var copy = JSON.parse(JSON.stringify(src));
   copy.id = uid(); copy.loadNo = nextLoadNo(); copy.date = todayStr();
+  copy.status = 'open'; copy.prepped = false; copy.truckCo = ''; copy.truckDate = ''; copy.truckTime = '';
+  copy.prepDate = ''; copy.prepTime = ''; copy.stackDate = ''; copy.stackTime = '';
+  copy.type = src.type || 'stack'; copy.custPickup = !!src.custPickup;
   copy.photos = []; copy.created = Date.now(); copy.updated = Date.now();
   copy.placements.forEach(function (p) { p.id = uid(); });
   state.loads.unshift(copy);
   markDirty();
   go('editor', copy.id);
 }
-function renderHome(root) {
-  var loads = state.loads.slice().sort(function (a, b) { return (b.updated || 0) - (a.updated || 0); });
-  var listKids;
-  if (!loads.length) {
-    listKids = [h('div', { class: 'empty' }, [h('b', null, ['No loads yet']), 'Start a new load and stack it from your trailer library.'])];
-  } else {
-    listKids = loads.map(function (ld) {
-      var trailerCount = ld.placements.filter(function (p) { var pr = getProfile(p.profileId); return !pr || pr.kind !== 'truck'; }).length;
-      return h('div', { class: 'loadrow', onclick: function () { go('editor', ld.id); } }, [
-        h('div', { class: 'lno' }, [ld.loadNo ? '#' + ld.loadNo : '(no #)', h('small', null, [ld.date || ''])]),
-        h('div', { class: 'lcust' }, [ld.customer || h('span', { style: 'color:var(--muted);font-weight:400' }, ['No customer']), ld.notes ? h('small', null, [ld.notes.slice(0, 90)]) : null]),
-        h('div', { class: 'lmeta' }, [trailerCount + ' trl', ld.photos.length ? h('span', { class: 'pill' }, [ld.photos.length + ' photo' + (ld.photos.length > 1 ? 's' : '')]) : null]),
-        h('div', { class: 'rowbtns' }, [
-          h('button', { class: 'iconbtn', title: 'Duplicate load', onclick: function (e) { e.stopPropagation(); duplicateLoad(ld); } }, ['⧉']),
-          h('button', { class: 'iconbtn danger', title: 'Delete load', onclick: function (e) {
-            e.stopPropagation();
-            confirmModal('Delete load ' + (ld.loadNo ? '#' + ld.loadNo : '') + '? Its photos are removed too.', function () {
-              ld.photos.forEach(function (ph) { removePhotoFile(ph); });
-              state.loads = state.loads.filter(function (x) { return x.id !== ld.id; });
-              markDirty(); renderRoute();
-            }, { okLabel: 'Delete', danger: true });
-          } }, ['✕'])
+function statusLabel(st) {
+  return { open: 'Loads', prep: 'To prep', stack: 'To stack today', ready: 'Ready', picked: 'Picked up' }[st || 'prep'] || 'To prep';
+}
+function fmt12(t) {
+  var m = String(t || '').match(/^(\d{1,2}):(\d{2})/);
+  if (!m) return t || '';
+  var hh = +m[1], ap = hh >= 12 ? 'PM' : 'AM';
+  hh = hh % 12 || 12;
+  return hh + ':' + m[2] + ' ' + ap;
+}
+function bookingStr(ld) {
+  if (!ld.truckDate) return '';
+  var d = ld.truckDate.slice(5).replace('-', '/');
+  return d + (ld.truckTime ? ' ' + fmt12(ld.truckTime) : '') + (ld.truckCo ? ' \u00b7 ' + ld.truckCo : '');
+}
+function bookTruckDlg(ld, presetDate, presetTime) {
+  var co = h('input', { placeholder: 'Trucking company', style: 'width:100%' });
+  var dt = h('input', { type: 'date', style: 'width:100%' });
+  var tm = h('input', { type: 'time', style: 'width:100%' });
+  co.value = ld.truckCo || ''; dt.value = presetDate || ld.truckDate || ''; tm.value = presetTime || ld.truckTime || '';
+  [co, dt, tm].forEach(function (el) { el.addEventListener('keydown', function (e) { e.stopPropagation(); }); });
+  var scrim = h('div', { class: 'modal-scrim' });
+  function lbl(t) { return h('label', { style: 'display:block;font:600 10.5px/1.8 Barlow,sans-serif;letter-spacing:.09em;text-transform:uppercase;color:var(--muted)' }, [t]); }
+  scrim.appendChild(h('div', { class: 'modal small' }, [
+    h('div', { class: 'modal-head' }, [
+      h('h2', { style: 'font-size:17px' }, ['Book truck \u2014 ' + (ld.loadNo ? '#' + ld.loadNo : '') + ' ' + (ld.customer || '')]),
+      h('button', { class: 'iconbtn', onclick: function () { scrim.remove(); } }, ['\u2715'])
+    ]),
+    h('div', { class: 'modal-body' }, [
+      h('div', { style: 'display:flex;flex-direction:column;gap:10px' }, [
+        h('div', null, [lbl('Trucking company'), co]),
+        h('div', { style: 'display:flex;gap:10px' }, [
+          h('div', { style: 'flex:1' }, [lbl('Pickup date'), dt]),
+          h('div', { style: 'flex:1' }, [lbl('Time'), tm])
         ])
-      ]);
-    });
+      ])
+    ]),
+    h('div', { class: 'modal-foot' }, [
+      ld.truckDate ? h('button', { class: 'btn small ghost', onclick: function () {
+        ld.truckCo = ''; ld.truckDate = ''; ld.truckTime = '';
+        ld.updated = Date.now(); markDirty(); scrim.remove(); renderRoute();
+      } }, ['Clear booking']) : null,
+      h('button', { class: 'btn', onclick: function () { scrim.remove(); } }, ['Cancel']),
+      h('button', { class: 'btn primary', onclick: function () {
+        ld.truckCo = co.value.trim(); ld.truckDate = dt.value; ld.truckTime = tm.value;
+        ld.updated = Date.now(); markDirty(); scrim.remove(); renderRoute();
+      } }, ['Save'])
+    ])
+  ]));
+  document.body.appendChild(scrim);
+  setTimeout(function () { co.focus(); }, 0);
+}
+var homeView = 'board';
+var yardHomeView = 'board';
+var scheduleLoadId = '';
+var scheduleLoadQuery = '';
+var scheduleSelection = null; // Explicit load + appointment, independent of workflow status.
+var calMode = 'week';  // 'week' | 'month'
+var calMonth = null;   // 'YYYY-MM'
+var calWeekStart = null; // iso of the week's Sunday
+function monthKey(d) { return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0'); }
+function isoOf(d) { return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0'); }
+function weekSunday(d) { return new Date(d.getFullYear(), d.getMonth(), d.getDate() - d.getDay()); }
+
+/* Each load can have three scheduled events: prep, stack, pickup (truck). */
+function isSemi(l) { return (l.type || 'stack') === 'semi'; }
+function calEventsFor(l) {
+  var st = l.status || 'prep';
+  var evs = [];
+  if (l.prepDate) evs.push({ l: l, kind: 'prep', date: l.prepDate, time: l.prepTime || '', done: !!l.prepped || st === 'ready' || st === 'picked' });
+  if (l.stackDate) evs.push({ l: l, kind: 'stack', date: l.stackDate, time: l.stackTime || '', done: st === 'ready' || st === 'picked' });
+  if (l.truckDate) evs.push({ l: l, kind: 'pickup', date: l.truckDate, time: l.truckTime || '', done: st === 'picked' });
+  return evs;
+}
+function eventChip(ev, withTime) {
+  var l = ev.l;
+  var names = { prep: '\ud83d\udee0 PREP', stack: '\ud83d\udce6 STACK', pickup: l.custPickup ? '\ud83c\udfe0' : (isSemi(l) && !l.stackDate ? '\ud83d\ude9a STACK & SHIP' : '\ud83d\ude9a') };
+  var cls = 'calload ev-' + ev.kind + (ev.done ? ' done' : '') + (ev.kind === 'pickup' && l.custPickup ? ' pickup-cust' : '');
+  var chip = h('button', {
+    class: cls,
+    title: names[ev.kind].replace(/^\S+\s?/, '') + (ev.kind === 'pickup' && l.truckCo ? l.truckCo + ' \u00b7 ' : '') + (l.customer || '') + ' \u2014 drag to move',
+    draggable: isYard() ? 'false' : 'true',
+    onclick: function (e) { e.stopPropagation(); calendarEventDlg(ev); }
+  }, [(ev.done ? '\u2713 ' : '') + names[ev.kind] + ' ' + (withTime && ev.time ? fmt12(ev.time) + ' ' : '') + (l.loadNo ? '#' + l.loadNo + ' ' : '') + (l.customer || '')]);
+  chip.addEventListener('dragstart', function (e) { e.dataTransfer.setData('text/plain', l.id + '|' + ev.kind); });
+  return chip;
+}
+function setEvent(l, kind, iso, time) {
+  if (isYard()) return;
+  if (kind === 'prep') { l.prepDate = iso; if (time !== null) l.prepTime = time; }
+  else if (kind === 'stack') { l.stackDate = iso; if (time !== null) l.stackTime = time; }
+  else { l.truckDate = iso; if (time !== null && time) l.truckTime = time; }
+  l.updated = Date.now(); markDirty(); renderRoute();
+}
+function scheduleDlg(l, iso, time) {
+  if (isYard()) return;
+  var d = new Date(+iso.slice(0, 4), +iso.slice(5, 7) - 1, +iso.slice(8, 10));
+  var scrim = h('div', { class: 'modal-scrim' });
+  function opt(kind, label, sub) {
+    return h('button', { class: 'btn', style: 'width:100%;justify-content:flex-start', onclick: function () {
+      scrim.remove();
+      if (kind === 'pickup') bookTruckDlg(l, iso, time || '');
+      else setEvent(l, kind, iso, time || '');
+    } }, [label]);
   }
-  var libChips = state.profiles.slice(0, 14).map(function (p) { return h('span', { class: 'chip' }, [p.name]); });
-  if (state.profiles.length > 14) libChips.push(h('span', { class: 'chip' }, ['+' + (state.profiles.length - 14) + ' more']));
-  root.appendChild(h('div', { class: 'home' }, [
-    h('div', { class: 'home-inner' }, [
-      h('h1', null, ['Loads']),
-      h('p', { class: 'sub' }, ['Stack a load, save it, and keep photos of how it left the yard.']),
-      h('div', { class: 'home-grid' }, [
-        h('div', { class: 'card' }, [
-          h('div', { class: 'card-head' }, [
-            h('h2', null, ['Saved loads']),
-            h('button', { class: 'btn primary small', onclick: newLoad }, ['+ New load'])
-          ])
-        ].concat(listKids)),
-        h('div', { class: 'card' }, [
-          h('div', { class: 'card-head' }, [h('h2', null, ['Trailer library'])]),
-          h('div', { class: 'libmini' }, state.profiles.length ? libChips : [h('span', { style: 'color:var(--muted);font-size:13px' }, ['No profiles yet — import a DXF to get started.'])]),
-          h('div', { class: 'card-foot' }, [
-            h('button', { class: 'btn small', onclick: startImport }, ['Import DXF…']),
-            h('button', { class: 'btn small ghost', onclick: function () { go('library'); } }, ['Manage library'])
-          ])
-        ]),
-        h('div', { class: 'card' }, [
-          h('div', { class: 'card-head' }, [h('h2', null, ['Backup'])]),
-          h('div', { style: 'padding:12px 16px;color:var(--muted);font-size:13px;line-height:1.5' }, [
-            'Everything auto-saves, and this device keeps its own backup copy. Export a file now and then for a copy you fully control — especially before app updates.'
-          ]),
-          h('div', { class: 'card-foot' }, [
-            h('button', { class: 'btn small', onclick: exportBackup }, ['Export backup file']),
-            h('button', { class: 'btn small ghost', onclick: importBackup }, ['Restore from file…'])
-          ])
-        ])
+  scrim.appendChild(h('div', { class: 'modal small' }, [
+    h('div', { class: 'modal-head' }, [
+      h('h2', { style: 'font-size:17px' }, ['Schedule ' + (l.loadNo ? '#' + l.loadNo : '') + ' \u2014 ' + d.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' }) + (time ? ' ' + fmt12(time) : '')]),
+      h('button', { class: 'iconbtn', onclick: function () { scrim.remove(); } }, ['\u2715'])
+    ]),
+    h('div', { class: 'modal-body' }, [
+      h('div', { style: 'display:flex;flex-direction:column;gap:8px' }, [
+        opt('prep', '\ud83d\udee0 Prep this load'),
+        opt('stack', '\ud83d\udce6 Stack / load this load'),
+        opt('pickup', l.custPickup ? '\ud83c\udfe0 Customer pickup' : (isSemi(l) ? '\ud83d\ude9a Truck day \u2014 stack & ship' : '\ud83d\ude9a Truck pickup')),
+        isSemi(l) ? h('div', { style: 'color:var(--muted);font-size:11.5px' }, ['Prep, stacking/loading and pickup can be scheduled independently, including on the same day.']) : null
       ])
     ])
   ]));
+  document.body.appendChild(scrim);
+}
+function calModeBtns() {
+  function mb(id, label) {
+    return h('button', { class: 'btn small' + (calMode === id ? ' primary' : ' ghost'), onclick: function () { calMode = id; renderRoute(); } }, [label]);
+  }
+  return h('div', { style: 'display:flex;gap:6px;margin-left:auto' }, [mb('week', 'Week'), mb('month', 'Month')]);
+}
+function calLegend() {
+  function dot(cls, label) { return h('span', { class: 'legit' }, [h('span', { class: 'legdot ' + cls }), label]); }
+  return h('div', { class: 'callegend' }, [
+    dot('ev-prep', 'Prep'), dot('ev-stack', 'Stack'), dot('ev-pickup', 'Pickup'), dot('pickup-cust', 'Customer pickup'), dot('done', 'Done \u2713')
+  ]);
+}
+function dropSetup(cell, iso, time) {
+  if (isYard()) return;
+  cell.addEventListener('dragover', function (e) { e.preventDefault(); cell.classList.add('dragover'); });
+  cell.addEventListener('dragleave', function () { cell.classList.remove('dragover'); });
+  cell.addEventListener('drop', function (e) {
+    e.preventDefault(); e.stopPropagation(); cell.classList.remove('dragover');
+    var raw = (e.dataTransfer.getData('text/plain') || '').split('|');
+    var id = raw[0], kind = raw[1] || 'new';
+    var l = null;
+    for (var i = 0; i < state.loads.length; i++) if (state.loads[i].id === id) l = state.loads[i];
+    if (!l || !['new','prep','stack','pickup'].includes(kind)) return;
+    scheduleSelection=null;
+    if (kind === 'new') scheduleDlg(l, iso, time || '');
+    else setEvent(l, kind, iso, time === '' ? null : time);
+  });
+}
+function placeSelectedEvent(iso, time) {
+  if(isYard() || !scheduleSelection)return false;
+  var selection=scheduleSelection;
+  var load=state.loads.find(function(l){return l.id===selection.id && l.status!=='picked';});
+  scheduleSelection=null;
+  if(!load){renderRoute();return true;}
+  if(selection.kind==='pickup'){renderRoute();bookTruckDlg(load,iso,time||'');}
+  else setEvent(load,selection.kind,iso,time||'');
+  return true;
+}
+function unschedPanel() {
+  var loads=state.loads.filter(function(l){return l.status!=='picked';}).sort(function(a,b){return String(a.loadNo||a.customer||'').localeCompare(String(b.loadNo||b.customer||''),undefined,{numeric:true});});
+  var search=h('input',{type:'search',placeholder:'Find load # or customer','aria-label':'Find a load',class:'schedule-search'});search.value=scheduleLoadQuery;
+  var select=h('select',{'aria-label':'Choose a load',class:'schedule-select'});
+  var detail=h('div',{class:'schedule-detail'});
+  function paint(){
+    detail.innerHTML='';
+    var l=loads.find(function(x){return x.id===scheduleLoadId;});
+    if(!l){detail.appendChild(h('p',{class:'unschedhint'},['Choose a load above to schedule it.']));return;}
+    detail.appendChild(h('strong',{class:'schedule-customer'},[(l.loadNo?'#'+l.loadNo+' · ':'')+(l.customer||'No customer')]));
+    detail.appendChild(h('p',{class:'unschedhint',role:'status'},[scheduleSelection?'Click a day or time to place '+({prep:'Prep',stack:'Stack / Load',pickup:'Pickup'}[scheduleSelection.kind])+'.':'Choose a task, then click a day or time.']));
+    [['prep','Prep','prepDate','prepTime'],['stack','Stack / Load','stackDate','stackTime'],['pickup','Pickup','truckDate','truckTime']].forEach(function(item){
+      var selected=scheduleSelection&&scheduleSelection.id===l.id&&scheduleSelection.kind===item[0];
+      var button=h('button',{class:'btn'+(selected?' primary':''),draggable:'true','aria-pressed':!!selected,onclick:function(){scheduleSelection=selected?null:{id:l.id,kind:item[0]};paint();}},[item[1]]);
+      button.addEventListener('dragstart',function(e){scheduleSelection=null;e.dataTransfer.setData('text/plain',l.id+'|'+item[0]);});
+      var date=l[item[2]],label='Not scheduled';
+      if(date){var parts=date.split('-');label=new Date(+parts[0],+parts[1]-1,+parts[2]).toLocaleDateString(undefined,{month:'short',day:'numeric'});if(l[item[3]])label+=' · '+fmt12(l[item[3]]);}
+      detail.appendChild(h('div',{class:'schedule-task'},[button,h('small',null,[label])]));
+    });
+    if(scheduleSelection)detail.appendChild(h('button',{class:'btn small ghost',onclick:function(){scheduleSelection=null;paint();}},['Cancel selection']));
+    detail.appendChild(h('button',{class:'btn small ghost',onclick:function(){scheduleSelection=null;go('editor',l.id);}},['Open load details']));
+  }
+  function filter(){
+    var query=scheduleLoadQuery.trim().toLowerCase();
+    var matches=loads.filter(function(l){return ((l.loadNo||'')+' '+(l.customer||'')).toLowerCase().includes(query);});
+    if(!matches.some(function(l){return l.id===scheduleLoadId;})){scheduleLoadId='';scheduleSelection=null;}
+    select.innerHTML='';select.appendChild(h('option',{value:''},[matches.length?'Choose a load ('+matches.length+')':'No matching loads']));
+    matches.forEach(function(l){select.appendChild(h('option',{value:l.id},[(l.loadNo?'#'+l.loadNo+' — ':'')+(l.customer||'No customer')]));});
+    select.value=scheduleLoadId;paint();
+  }
+  search.addEventListener('input',function(){scheduleLoadQuery=search.value;filter();});
+  select.addEventListener('change',function(){scheduleLoadId=select.value;scheduleSelection=null;paint();});
+  filter();
+  return h('div',{class:'unschedpanel schedule-picker'},[h('h3',null,['Schedule a load']),search,select,detail]);
+}
+function calSplit(wrap) {
+  if (isYard()) return wrap;
+  return h('div', { class: 'calsplit' }, [unschedPanel(), wrap]);
+}
+function buildDayMap() {
+  var byKey = {};   // iso -> hourKey -> [events]
+  state.loads.forEach(function (l) {
+    calEventsFor(l).forEach(function (ev) {
+      var hr = 'other';
+      var m = String(ev.time || '').match(/^(\d{1,2}):/);
+      if (m) { var hn = +m[1]; if (hn >= 6 && hn <= 16) hr = hn; }
+      byKey[ev.date] = byKey[ev.date] || {};
+      (byKey[ev.date][hr] = byKey[ev.date][hr] || []).push(ev);
+    });
+  });
+  return byKey;
+}
+function renderWeek() {
+  if (!calWeekStart) calWeekStart = isoOf(weekSunday(new Date()));
+  var start = new Date(+calWeekStart.slice(0, 4), +calWeekStart.slice(5, 7) - 1, +calWeekStart.slice(8, 10));
+  var days = [];
+  for (var i = 0; i < 7; i++) days.push(new Date(start.getFullYear(), start.getMonth(), start.getDate() + i));
+  var todayIso = todayStr();
+  var byKey = buildDayMap();
+  function shiftW(n) {
+    var d = new Date(start.getFullYear(), start.getMonth(), start.getDate() + n * 7);
+    calWeekStart = isoOf(d); renderRoute();
+  }
+  var wrap = h('div', { class: 'calwrap' }, [
+    h('div', { class: 'calhead' }, [
+      h('button', { class: 'btn small ghost', onclick: function () { shiftW(-1); } }, ['\u25c0']),
+      h('h2', null, [days[0].toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) + ' \u2013 ' + days[6].toLocaleDateString(undefined, { month: 'short', day: 'numeric' })]),
+      h('button', { class: 'btn small ghost', onclick: function () { shiftW(1); } }, ['\u25b6']),
+      h('button', { class: 'btn small', onclick: function () { calWeekStart = isoOf(weekSunday(new Date())); renderRoute(); } }, ['This week']),
+      calModeBtns()
+    ]),
+    calLegend()
+  ]);
+  var grid = h('div', { class: 'weekgrid' });
+  grid.appendChild(h('div', { class: 'wtimehead' }));
+  days.forEach(function (d) {
+    var iso = isoOf(d);
+    grid.appendChild(h('div', { class: 'wdayhead' + (iso === todayIso ? ' today' : ''), title: 'See everything on this day', onclick: function () { if(!placeSelectedEvent(iso,''))dayDetailDlg(iso); } }, [
+      d.toLocaleDateString(undefined, { weekday: 'short' }) + ' ' + d.getDate()
+    ]));
+  });
+  var hours = ['other', 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
+  hours.forEach(function (hr) {
+    grid.appendChild(h('div', { class: 'wtime' }, [hr === 'other' ? 'no time' : fmt12(String(hr).padStart(2, '0') + ':00')]));
+    days.forEach(function (d) {
+      var iso = isoOf(d);
+      var slotTime = hr === 'other' ? '' : String(hr).padStart(2, '0') + ':00';
+      var cell = h('div', { class: 'wcell' + (iso === todayIso ? ' today' : '') });
+      ((byKey[iso] || {})[hr] || []).sort(function (a, b) { return (a.time || '').localeCompare(b.time || ''); })
+        .forEach(function (ev) { cell.appendChild(eventChip(ev, true)); });
+      if (!isYard()) {
+        dropSetup(cell, iso, slotTime);
+        cell.addEventListener('click', function () { if(!placeSelectedEvent(iso,slotTime))dayBookDlg(iso, slotTime); });
+      }
+      grid.appendChild(cell);
+    });
+  });
+  wrap.appendChild(h('div', { class: 'calscroll' }, [grid]));
+  return calSplit(wrap);
+}
+function renderCalendar() {
+  if (calMode === 'week') return renderWeek();
+  if (!calMonth) calMonth = monthKey(new Date());
+  var yr = +calMonth.slice(0, 4), mo = +calMonth.slice(5, 7);
+  var first = new Date(yr, mo - 1, 1);
+  var startDow = first.getDay();
+  var daysIn = new Date(yr, mo, 0).getDate();
+  var byKey = buildDayMap();
+  function shift(n) { calMonth = monthKey(new Date(yr, mo - 1 + n, 1)); renderRoute(); }
+  var wrap = h('div', { class: 'calwrap' }, [
+    h('div', { class: 'calhead' }, [
+      h('button', { class: 'btn small ghost', onclick: function () { shift(-1); } }, ['\u25c0']),
+      h('h2', null, [first.toLocaleString(undefined, { month: 'long', year: 'numeric' })]),
+      h('button', { class: 'btn small ghost', onclick: function () { shift(1); } }, ['\u25b6']),
+      h('button', { class: 'btn small', onclick: function () { calMonth = monthKey(new Date()); renderRoute(); } }, ['Today']),
+      calModeBtns()
+    ]),
+    calLegend()
+  ]);
+  var grid = h('div', { class: 'calgrid' });
+  ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].forEach(function (d) { grid.appendChild(h('div', { class: 'caldow' }, [d])); });
+  for (var i = 0; i < startDow; i++) grid.appendChild(h('div', { class: 'calcell empty' }));
+  var todayIso = todayStr();
+  for (var day = 1; day <= daysIn; day++) {
+    (function (day) {
+      var iso = yr + '-' + String(mo).padStart(2, '0') + '-' + String(day).padStart(2, '0');
+      var cell = h('div', { class: 'calcell' + (iso === todayIso ? ' today' : '') });
+      cell.appendChild(h('div', { class: 'caldate' }, [String(day)]));
+      var evs = [];
+      var m = byKey[iso] || {};
+      Object.keys(m).forEach(function (k) { evs = evs.concat(m[k]); });
+      evs.sort(function (a, b) { return (a.time || 'zz').localeCompare(b.time || 'zz'); });
+      evs.slice(0, 3).forEach(function (ev) { cell.appendChild(eventChip(ev, true)); });
+      if (evs.length > 3) {
+        cell.appendChild(h('button', { class: 'calmore', onclick: function (e) { e.stopPropagation(); dayDetailDlg(iso); } }, ['+' + (evs.length - 3) + ' more']));
+      }
+      cell.addEventListener('click', function () { if(!placeSelectedEvent(iso,''))dayDetailDlg(iso); });
+      if (!isYard()) dropSetup(cell, iso, '');
+      grid.appendChild(cell);
+    })(day);
+  }
+  wrap.appendChild(h('div', { class: 'calscroll' }, [grid]));
+  return calSplit(wrap);
+}
+function calendarEventDlg(ev) {
+  var l=ev.l,readonly=isYard(),scrim=h('div',{class:'modal-scrim'});
+  var kind=h('select',{'aria-label':'Appointment type'},[['prep','Prep'],['stack','Stack / Load'],['pickup','Pickup']].map(function(x){return h('option',{value:x[0]},[x[1]]);}));kind.value=ev.kind;
+  var date=h('input',{type:'date',required:true,'aria-label':'Appointment date'});date.value=ev.date;
+  var time=h('input',{type:'time','aria-label':'Appointment time'});time.value=ev.time||'';
+  var status=h('select',{'aria-label':'Load progress'},[['open','New load'],['prep','Needs prep'],['prepped','Prepped'],['stack','Needs stacking / loading'],['ready','Ready to ship'],['picked','Shipped / picked up']].map(function(x){return h('option',{value:x[0]},[x[1]]);}));
+  var originalStatus=workflowStage(l)===2?'prepped':(l.status||'prep');status.value=originalStatus;
+  [kind,date,time,status].forEach(function(n){n.disabled=readonly;});
+  var feedback=h('p',{class:'sub',role:'alert'});
+  function close(){scrim.remove();}
+  function field(label,node){return h('label',{style:'display:grid;gap:5px'},[label,node]);}
+  var save=h('button',{class:'btn primary',onclick:function(){
+    if(isYard()||!date.reportValidity())return;
+    var target=kind.value,keys={prep:'prepDate',stack:'stackDate',pickup:'truckDate'};
+    if(target!==ev.kind&&l[keys[target]]){feedback.textContent='This load already has that appointment. Edit or remove it first so it is not overwritten.';return;}
+    if(target!==ev.kind)clearEvent(l,ev.kind);
+    if(status.value!==originalStatus){l.status=status.value==='prepped'?'prep':status.value;l.prepped=['prepped','stack','ready','picked'].includes(status.value);}
+    // Empty time explicitly means an all-day/no-time appointment.
+    if(target==='pickup')l.truckTime=time.value;
+    close();setEvent(l,target,date.value,time.value);toast('Appointment updated');
+  }},['Save changes']);
+  var remove=h('button',{class:'btn danger',onclick:function(){
+    if(isYard())return;
+    clearEvent(l,ev.kind);close();renderRoute();toast('Appointment removed. The load is still available.');
+  }},['Remove appointment']);
+  scrim.appendChild(h('div',{class:'modal small'},[
+    h('div',{class:'modal-head'},[h('h2',null,['Load '+(l.loadNo?'#'+l.loadNo:'appointment')]),h('button',{class:'iconbtn','aria-label':'Close appointment',onclick:close},['×'])]),
+    h('div',{class:'modal-body',style:'display:grid;gap:14px'},[
+      h('strong',null,[l.customer||'No customer']),field('Task',kind),field('Date',date),field('Time (optional)',time),field('Load progress',status),
+      h('p',{class:'sub'},['Removing this appointment keeps the load, paperwork and other appointments. Changing progress updates the load across the app.']),feedback,
+      h('button',{class:'btn',onclick:function(){close();go('editor',l.id);}},['Open load']),
+      readonly?null:save,readonly?null:remove
+    ])
+  ]));
+  scrim.addEventListener('click',function(e){if(e.target===scrim)close();});document.body.appendChild(scrim);
+}
+function clearEvent(l, kind) {
+  if (isYard()) return;
+  if (kind === 'prep') { l.prepDate = ''; l.prepTime = ''; }
+  else if (kind === 'stack') { l.stackDate = ''; l.stackTime = ''; }
+  else { l.truckCo = l.truckCo; l.truckDate = ''; l.truckTime = ''; }
+  l.updated = Date.now(); markDirty();
+}
+function dayDetailDlg(iso) {
+  var d = new Date(+iso.slice(0, 4), +iso.slice(5, 7) - 1, +iso.slice(8, 10));
+  var scrim = h('div', { class: 'modal-scrim' });
+  var body = h('div', { class: 'modal-body' });
+  var names = { prep: '\ud83d\udee0 Prep', stack: '\ud83d\udce6 Stack', pickup: '\ud83d\ude9a Pickup' };
+  function redraw() {
+    body.innerHTML = '';
+    var evs = [];
+    state.loads.forEach(function (l) {
+      calEventsFor(l).forEach(function (ev) { if (ev.date === iso) evs.push(ev); });
+    });
+    evs.sort(function (a, b) { return (a.time || 'zz').localeCompare(b.time || 'zz'); });
+    if (!evs.length) body.appendChild(h('div', { class: 'tiresempty', style: 'padding:6px 0 10px' }, ['Nothing scheduled this day']));
+    evs.forEach(function (ev) {
+      var l = ev.l;
+      var kindName = ev.kind === 'pickup' ? (l.custPickup ? '\ud83c\udfe0 Customer pickup' : (isSemi(l) ? '\ud83d\ude9a Stack & ship' : '\ud83d\ude9a Pickup')) : names[ev.kind];
+      var row = h('div', { class: 'detrow' + (ev.done ? ' done' : ''), onclick: function () { scrim.remove(); go('editor', l.id); } }, [
+        h('span', { class: 'legdot ' + (ev.kind === 'pickup' && l.custPickup ? 'pickup-cust' : 'ev-' + ev.kind) + (ev.done ? ' done' : '') }),
+        h('span', { class: 'dettime' }, [ev.time ? fmt12(ev.time) : '\u2014']),
+        h('span', { class: 'detkind' }, [(ev.done ? '\u2713 ' : '') + kindName]),
+        h('span', { class: 'detload' }, [(l.loadNo ? '#' + l.loadNo + ' ' : '') + (l.customer || '')]),
+        h('span', { class: 'detsub' }, [ev.kind === 'pickup' && l.truckCo ? l.truckCo : statusLabel(l.status)]),
+        isYard() ? null : h('button', { class: 'tiredel', title: 'Take this off the schedule', onclick: function (e) {
+          e.stopPropagation();
+          clearEvent(l, ev.kind);
+          redraw(); 
+        } }, ['\u2715'])
+      ]);
+      body.appendChild(row);
+    });
+    if (!isYard()) {
+      body.appendChild(h('div', { style: 'margin-top:10px' }, [
+        h('button', { class: 'btn small', style: 'width:100%;justify-content:center', onclick: function () {
+          scrim.remove(); dayBookDlg(iso);
+        } }, ['+ Schedule something this day'])
+      ]));
+    }
+  }
+  redraw();
+  scrim.appendChild(h('div', { class: 'modal small' }, [
+    h('div', { class: 'modal-head' }, [
+      h('h2', { style: 'font-size:17px' }, [d.toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' })]),
+      h('button', { class: 'iconbtn', onclick: function () { scrim.remove(); renderRoute(); } }, ['\u2715'])
+    ]),
+    body
+  ]));
+  scrim.addEventListener('click', function (e) { if (e.target === scrim) { scrim.remove(); renderRoute(); } });
+  document.body.appendChild(scrim);
+}
+function dayBookDlg(iso, time) {
+  if (isYard()) return;
+  var candidates = state.loads.filter(function (l) { return (l.status || 'prep') !== 'picked'; });
+  if (!candidates.length) { toast('No active loads to schedule'); return; }
+  var scrim = h('div', { class: 'modal-scrim' });
+  var d = new Date(+iso.slice(0, 4), +iso.slice(5, 7) - 1, +iso.slice(8, 10));
+  scrim.appendChild(h('div', { class: 'modal small' }, [
+    h('div', { class: 'modal-head' }, [
+      h('h2', { style: 'font-size:17px' }, ['Schedule \u2014 ' + d.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' }) + (time ? ' ' + fmt12(time) : '')]),
+      h('button', { class: 'iconbtn', onclick: function () { scrim.remove(); } }, ['\u2715'])
+    ]),
+    h('div', { class: 'modal-body' }, [
+      h('div', { style: 'color:var(--muted);font-size:12.5px;margin-bottom:8px' }, ['Which load?']),
+      h('div', { style: 'display:flex;flex-direction:column;gap:6px;max-height:50vh;overflow-y:auto' }, candidates.map(function (l) {
+        return h('button', { class: 'btn small', style: 'justify-content:flex-start', onclick: function () {
+          scrim.remove();
+          scheduleDlg(l, iso, time || '');
+        } }, [(l.loadNo ? '#' + l.loadNo + ' ' : '') + (l.customer || '') + ' \u2014 ' + statusLabel(l.status)]);
+      }))
+    ])
+  ]));
+  document.body.appendChild(scrim);
+}
+function workflowStage(ld) {
+  if(ld.status==='picked')return 5;
+  if(ld.status==='ready')return 4;
+  if(ld.status==='stack')return 3;
+  if(ld.prepped)return 2;
+  return ld.status==='open'?0:1;
+}
+function workflowLabel(ld){return ['New load','To prepare','Prepped','To stack','Ready to ship','Picked up'][workflowStage(ld)];}
+function yardAssignments(loads, today) {
+  var pending = loads.filter(function (l) { return l.status !== 'ready' && l.status !== 'picked'; });
+  return [
+    pending.filter(function (l) { return !l.prepped && (l.prepDate ? l.prepDate <= today : l.status === 'prep'); }),
+    pending.filter(function (l) {
+      var due = l.stackDate || (isSemi(l) ? l.truckDate : '');
+      return due ? due <= today : l.status === 'stack';
+    })
+  ];
+}
+function renderHome(root) {
+  var currentHomeView = isYard() ? yardHomeView : homeView;
+  function changeHomeView(id) { if (isYard()) yardHomeView = id; else homeView = id; renderRoute(); }
+  var loads = state.loads.slice();
+  function loadRow(ld) {
+    var trailerCount = ld.placements.filter(function (p) { var pr = getProfile(p.profileId); return !pr || pr.kind !== 'truck'; }).length;
+    var stat = ld.status || 'prep';
+    var sub = [ld.address, ld.notes].filter(Boolean).join(' \u00b7 ');
+    var badges = [h('span',{class:'workflow-badge stage-'+workflowStage(ld)},[workflowLabel(ld)])];
+    if (isYard()) {
+      var today = todayStr();
+      var prepOverdue = !ld.prepped && ld.prepDate && ld.prepDate < today && ld.status !== 'ready' && ld.status !== 'picked';
+      var stackDue = ld.stackDate || (isSemi(ld) ? ld.truckDate : '');
+      var stackOverdue = stackDue && stackDue < today && ld.status !== 'ready' && ld.status !== 'picked';
+      if (prepOverdue || stackOverdue) badges.push(h('span', { class: 'workflow-badge overdue-badge' }, ['Carried forward · ' + (prepOverdue ? 'prep due ' + ld.prepDate : 'stack due ' + stackDue)]));
+    }
+    if (ld.prepDate && !ld.prepped && stat !== 'ready' && stat !== 'picked') badges.push(h('span', { class: 'pill prepev' }, ['\ud83d\udee0 ' + ld.prepDate.slice(5).replace('-', '/') + (ld.prepTime ? ' ' + fmt12(ld.prepTime) : '')]));
+    if (ld.stackDate && stat !== 'ready' && stat !== 'picked') badges.push(h('span', { class: 'pill stackev' }, ['\ud83d\udce6 ' + ld.stackDate.slice(5).replace('-', '/') + (ld.stackTime ? ' ' + fmt12(ld.stackTime) : '')]));
+    if ((ld.type || 'stack') === 'semi') badges.push(h('span', { class: 'pill' }, ['Semi']));
+    if (ld.custPickup) badges.push(h('span', { class: 'pill pickup' }, ['\ud83c\udfe0 Customer pickup']));
+    if (ld.prepped && (stat === 'prep' || stat === 'open')) badges.push(h('span', { class: 'pill prepped' }, ['\u2705 Prepped']));
+    if (ld.truckDate && stat !== 'picked') badges.push(h('span', { class: 'pill truck' }, ['\ud83d\ude9a ' + bookingStr(ld)]));
+    if ((ld.docs||[]).length) badges.push(h('span',{class:'pill'},[ld.docs.length+' document'+(ld.docs.length===1?'':'s')]));
+    if (ld.photos.length) badges.push(h('span', { class: 'pill' }, [ld.photos.length + ' photo' + (ld.photos.length > 1 ? 's' : '')]));
+    var btns = null;
+    if (!isYard()) {
+      var sel = h('select', { class: 'statussel', title: 'Load status' }, ['open', 'prep', 'prepped', 'stack', 'ready', 'picked'].map(function (st) {
+        return h('option', { value: st }, [st === 'prepped' ? 'Prepped' : statusLabel(st)]);
+      }));
+      sel.value = workflowStage(ld) === 2 ? 'prepped' : stat;
+      sel.addEventListener('click', function (e) { e.stopPropagation(); });
+      sel.addEventListener('change', function (e) {
+        e.stopPropagation();
+        ld.status = sel.value === 'prepped' ? 'prep' : sel.value; ld.prepped = ['prepped','stack','ready','picked'].indexOf(sel.value) !== -1; ld.updated = Date.now(); markDirty(); renderRoute();
+      });
+      btns = h('div', { class: 'rowbtns' }, [
+        sel,
+        h('button',{class:'btn small',title:'Attach PDF paperwork to this load',onclick:function(e){e.stopPropagation();attachLoadDocuments(ld,e.currentTarget,function(){renderRoute();});}},['Upload documents']),
+        stat === 'prep' ? h('button', { class: 'iconbtn', title: ld.prepped ? 'Un-mark prepped' : 'Mark as prepped', onclick: function (e) {
+          e.stopPropagation(); ld.prepped = !ld.prepped; ld.updated = Date.now(); markDirty(); renderRoute();
+        } }, [ld.prepped ? '\u2705' : '\u2610']) : null,
+        h('button', { class: 'iconbtn', title: ld.truckDate ? 'Edit truck booking' : 'Book a truck', onclick: function (e) { e.stopPropagation(); bookTruckDlg(ld); } }, ['\ud83d\ude9a']),
+        h('button', { class: 'iconbtn', title: 'Duplicate load', onclick: function (e) { e.stopPropagation(); duplicateLoad(ld); } }, ['\u29c9']),
+        h('button', { class: 'iconbtn danger', title: 'Delete load', onclick: function (e) {
+          e.stopPropagation();
+          confirmModal('Delete load ' + (ld.loadNo ? '#' + ld.loadNo : '') + '? Its photos are removed too.', function () {
+            ld.photos.forEach(function (ph) { removePhotoFile(ph); });
+            state.loads = state.loads.filter(function (x) { return x.id !== ld.id; });
+            markDirty(); renderRoute();
+          }, { okLabel: 'Delete', danger: true });
+        } }, ['\u2715'])
+      ]);
+    }
+    return h('div', { class: 'loadrow', 'data-tour-load': practiceSession ? 'true' : null, onclick: function () { go('editor', ld.id); } }, [
+      h('div', { class: 'lno' }, [ld.loadNo ? '#' + ld.loadNo : '(no #)', h('small', null, [ld.date || ''])]),
+      h('div', { class: 'lcust' }, [ld.customer || h('span', { style: 'color:var(--muted);font-weight:400' }, ['No customer']), sub ? h('small', null, [sub.slice(0, 90)]) : null]),
+      h('div', { class: 'lmeta' }, [trailerCount + ' trl'].concat(badges)),
+      btns
+    ]);
+  }
+  function section(title, rows, extraHead, emptyText) {
+    return h('div', { class: 'card boardsec' }, [
+      h('div', { class: 'card-head' }, [h('h2', null, [title + (rows.length ? ' \u00b7 ' + rows.length : '')]), extraHead])
+    ].concat(rows.length ? rows.map(loadRow) : [h('div', { class: 'boardempty' }, [emptyText || 'Nothing here'])]));
+  }
+  var active = loads.filter(function (l) { return (l.status || 'prep') !== 'picked'; });
+  var booked = active.filter(function (l) { return l.truckDate; }).sort(function (a, b) {
+    return (a.truckDate + ' ' + (a.truckTime || '')).localeCompare(b.truckDate + ' ' + (b.truckTime || ''));
+  });
+  var byStat = function (st) { return active.filter(function (l) { return (l.status || 'prep') === st; }); };
+  var open = byStat('open');
+  var prepAll = byStat('prep');
+  var prep = prepAll.filter(function (l) { return !l.prepped; });
+  var preppedLoads = prepAll.filter(function (l) { return l.prepped; });
+  var stackToday = byStat('stack');
+  var ready = active.filter(function (l) { return (l.status || 'prep') === 'ready' && !l.truckDate; });
+  var picked = loads.filter(function (l) { return (l.status || 'prep') === 'picked'; })
+    .sort(function (a, b) { return (b.updated || 0) - (a.updated || 0); });
+  var pickedRows = [];
+  var pickedWrap = h('div', { class: 'card boardsec' }, [
+    h('div', { class: 'card-head' }, [
+      h('h2', null, ['Picked up \u00b7 ' + picked.length]),
+      picked.length ? h('button', { class: 'btn small ghost', onclick: function (e) {
+        var el = e.target;
+        var body = el.closest('.card').querySelector('.pickedbody');
+        body.hidden = !body.hidden;
+        el.textContent = body.hidden ? 'Show' : 'Hide';
+      } }, ['Show']) : null
+    ]),
+    (function () {
+      var b = h('div', { class: 'pickedbody' }, picked.map(loadRow));
+      b.hidden = true;
+      return b;
+    })()
+  ]);
+  function viewBtn(id, label) {
+    return h('button', { class: 'btn small' + (currentHomeView === id ? ' primary' : ' ghost'), onclick: function () {
+      changeHomeView(id);
+    } }, [label]);
+  }
+  var stages = [
+    ['New loads', active.filter(function(l){return workflowStage(l) === 0;}), 'Upload paperwork and plan the load.'],
+    ['To prepare', active.filter(function(l){return workflowStage(l) === 1;}), 'Gather the trailers, parts and tires.'],
+    ['Prepped · waiting to stack', active.filter(function(l){return workflowStage(l) === 2;}), 'Preparation is complete. Schedule stacking next.'],
+    ['To stack', stackToday, 'Build the load and record its photos.'],
+    ['Ready to ship', byStat('ready'), 'Stacking is complete. Confirm pickup.']
+  ];
+  if (isYard()) {
+    var assignments = yardAssignments(loads, todayStr());
+    stages = [
+      ['To prepare', assignments[0], 'Prep assignments due today or overdue, plus loads assigned to prep without a date.'],
+      ['Stack today', assignments[1], 'Today’s stacking plus unfinished work carried forward. Original dates stay visible; overdue semi arrivals need office confirmation.']
+    ];
+  }
+  root.appendChild(h('div', {class:'home workflow-home'}, [h('div',{class:'home-inner'},[
+    h('div',{class:'homehead'},[
+      h('div',null,[h('h1',null,[isYard() ? 'Yard work' : 'Load dashboard']),h('p',{class:'sub'},['Prepare → Stack → Ship. Open a load to see its details and next step.'])]),
+      h('div',{class:'viewtoggle'},[isYard()?null:h('button',{class:'btn primary',onclick:newLoad},['+ New load']),viewBtn('board',isYard()?'Daily view':'Overview'),viewBtn('cal','Schedule')])
+    ]),
+    currentHomeView==='cal' && isYard()?h('p',{class:'sub'},['Schedule · view only. Browse upcoming prep, stacking and truck arrivals. Open a load for details; schedule changes are handled by the office.']):null,
+    currentHomeView==='cal'?null:h('div',{class:'stage-summary'},stages.map(function(stage,i){return h('button',{class:'stage-tile stage-'+i,onclick:function(){changeHomeView('board');document.getElementById('stage-'+i).scrollIntoView({behavior:'smooth',block:'start'});}},[h('strong',null,[String(stage[1].length)]),h('span',null,[stage[0]])]);})),
+    currentHomeView==='cal' ? renderCalendar() : h('div',{class:'workflow-stages'},stages.map(function(stage,i){
+      var card=section((i+1)+'. '+stage[0],stage[1],h('span',{class:'stage-description'},[stage[2]]),'No loads in this stage');card.id='stage-'+i;card.classList.add('stage-'+i);return card;
+    })),
+    isYard()?null:h('details',{class:'dashboard-extra'},[h('summary',null,['Pickup bookings · '+booked.length]),section('Scheduled pickups',booked,null,'No pickups scheduled')]),
+    isYard()?null:pickedWrap,
+    isYard()?null:h('details',{class:'dashboard-extra'},[h('summary',null,['Settings & tools']),h('div',{class:'dashboard-tools'},[
+      h('button',{class:'btn',onclick:function(){go('library');}},['Trailer library']),h('button',{class:'btn',onclick:tireStylesModal},['Tire types & TINs']),realRole()==='admin'?h('button',{class:'btn',onclick:rolesModal},['Manage team']):null,h('button',{class:'btn',onclick:exportBackup},['Export backup']),h('button',{class:'btn',onclick:importBackup},['Restore backup'])])])
+  ])]));
+}
+
+/* ---------- team roles + tire sizes ---------- */
+function rolesModal() {
+  if(realRole()!=='admin') return;
+  var scrim=h('div',{class:'modal-scrim'}), body=h('div',{class:'modal-body'});
+  function roleSelect(value){ var s=h('select',{'aria-label':'Role'},['admin','user','yard'].map(function(r){return h('option',{value:r},[r==='admin'?'Admin — includes team management':r==='user'?'User — all work, no team management':'Yard — view stacks and update work records']);})); s.value=value; return s; }
+  function fail(e){toast(e.message || 'Team update failed',true);}
+  function passwordFields(){
+    var password=h('input',{type:'password',autocomplete:'new-password',placeholder:'Password (at least 12 characters)','aria-label':'New password',minlength:12,maxlength:128,required:true});
+    var confirm=h('input',{type:'password',autocomplete:'new-password',placeholder:'Type password again','aria-label':'Confirm password',required:true});
+    return {password:password,confirm:confirm,valid:function(){if(!password.reportValidity()||!confirm.reportValidity())return false;if(password.value!==confirm.value){toast('The passwords do not match.',true);return false;}return true;},clear:function(){password.value='';confirm.value='';}};
+  }
+  function reload(){
+    body.textContent='Loading team…';
+    RS_STORAGE.listMembers().then(function(members){
+      body.innerHTML='';
+      members.forEach(function(m){
+        var role=roleSelect(m.role), enabled=h('input',{type:'checkbox','aria-label':'Active account'}); enabled.checked=m.active;
+        var save=h('button',{class:'btn small',onclick:function(){save.disabled=true;RS_STORAGE.setMember(m.user_id,role.value,enabled.checked).then(reload).catch(function(e){save.disabled=false;fail(e);});}},['Save access']);
+        if(m.email.toLowerCase()===currentUserEmail){role.disabled=true;enabled.disabled=true;save.disabled=true;}
+        var pw=passwordFields(), passwordBox=h('details',null,[h('summary',null,['Set a new password']),h('p',{class:'sub'},['This replaces the current password and allows sign-in without an email link. Share it privately with this person.']),pw.password,pw.confirm]);
+        var passwordSave=h('button',{class:'btn',onclick:function(){if(!pw.valid())return;passwordSave.disabled=true;RS_STORAGE.setMemberPassword(m.user_id,pw.password.value).then(function(){pw.clear();passwordBox.open=false;toast('Password updated. They can sign in now.');}).catch(fail).finally(function(){passwordSave.disabled=false;});}},['Save new password']);
+        passwordBox.appendChild(passwordSave);
+        if(m.email.toLowerCase()===currentUserEmail)passwordBox.hidden=true;
+        body.appendChild(h('div',{style:'display:grid;gap:8px;margin-bottom:18px'},[h('b',null,[m.name?m.name+' — '+(m.username||m.email):(m.username||m.email)]),role,h('label',null,[enabled,' Active']),save,passwordBox]));
+      });
+      var name=h('input',{placeholder:'Full name','aria-label':'Full name',required:true,maxlength:120}),newEmail=h('input',{type:'email',placeholder:'Email used to sign in','aria-label':'New account email',required:true}),newRole=roleSelect('user'),newPw=passwordFields();
+      var accountType=h('select',{'aria-label':'Account sign-in type'},[h('option',{value:'email'},['Email account']),h('option',{value:'username'},['Username account — no email needed'])]);
+      var username=h('input',{placeholder:'Username (3–32 letters, numbers, dots, _ or -)','aria-label':'New account username',pattern:'[a-zA-Z0-9][a-zA-Z0-9._\\-]{2,31}',minlength:3,maxlength:32,autocomplete:'off'});username.hidden=true;
+      accountType.onchange=function(){var useUsername=accountType.value==='username';username.hidden=!useUsername;username.required=useUsername;newEmail.hidden=useUsername;newEmail.required=!useUsername;};
+      var create=h('button',{class:'btn primary',onclick:function(){if(!name.reportValidity()||!name.value.trim()||!(accountType.value==='username'?username.reportValidity():newEmail.reportValidity())||!newPw.valid())return;create.disabled=true;RS_STORAGE.createMember(name.value.trim(),accountType.value==='email'?newEmail.value.trim():'',newRole.value,newPw.password.value,accountType.value==='username'?username.value.trim():'').then(function(){newPw.clear();toast('Account created. They can sign in now; no email is needed.');reload();}).catch(function(e){create.disabled=false;fail(e);});}},['Create account']);
+      body.appendChild(h('div',{style:'display:grid;gap:8px;margin:24px 0'},[h('h3',null,['Create a person with a password']),h('p',{class:'sub'},['Choose email or username sign-in, then enter their name and a unique password. Give them their login privately. Passwords cannot be viewed later; you can replace them.']),name,accountType,newEmail,username,newRole,newPw.password,newPw.confirm,create]));
+      var email=h('input',{type:'email',placeholder:'Employee email','aria-label':'Employee email'}), role=roleSelect('yard');
+      var invite=h('button',{class:'btn primary',onclick:function(){if(!email.reportValidity()||!email.value.trim())return;invite.disabled=true;RS_STORAGE.inviteMember(email.value.trim(),role.value).then(function(){toast('Invitation sent');reload();}).catch(function(e){invite.disabled=false;fail(e);});}},['Send invitation']);
+      body.appendChild(h('div',{style:'display:grid;gap:8px'},[h('h3',null,['Invite a person']),email,role,invite,h('p',{class:'sub'},['Each person gets their own login. Only admins can manage access. Another admin must change your own access.'])]));
+    }).catch(fail);
+  }
+  scrim.appendChild(h('div',{class:'modal small'},[h('div',{class:'modal-head'},[h('h2',null,['Manage team']),h('button',{class:'iconbtn',onclick:function(){scrim.remove();}},['×'])]),body]));
+  document.body.appendChild(scrim);reload();
+}
+function tireStylesModal() {
+  var ta = h('textarea', { rows: 8, style: 'width:100%', placeholder: 'One size per line, e.g.\nST205/75R15\nST235/80R16' });
+  ta.value = (state.tireStyles || []).join('\n');
+  var tins = Object.assign({}, state.tireTINs || {});
+  var tinFields = h('div', { class: 'tin-defaults' });
+  function refreshTINs() {
+    tinFields.innerHTML = '';
+    Array.from(new Set(ta.value.split('\n').map(function (s) { return s.trim(); }).filter(Boolean))).forEach(function (style) {
+      var input = h('input', { placeholder: 'Current TIN', 'aria-label': 'Current TIN for ' + style, value: tins[style] || '' });
+      input.addEventListener('input', function () { tins[style] = input.value.trim(); });
+      tinFields.appendChild(h('label', null, [h('span', null, [style]), input]));
+    });
+  }
+  ta.addEventListener('change', refreshTINs);
+  refreshTINs();
+  ta.addEventListener('keydown', function (e) { e.stopPropagation(); });
+  var scrim = h('div', { class: 'modal-scrim' });
+  scrim.appendChild(h('div', { class: 'modal small' }, [
+    h('div', { class: 'modal-head' }, [
+      h('h2', { style: 'font-size:17px' }, ['Tire sizes']),
+      h('button', { class: 'iconbtn', onclick: function () { scrim.remove(); } }, ['\u2715'])
+    ]),
+    h('div', { class: 'modal-body' }, [
+      h('div', { style: 'color:var(--muted);font-size:12.5px;margin-bottom:8px' }, ['These show as one-tap picks when anyone adds tire info to a load. One per line.']),
+      ta,
+      h('p', { class: 'tin-help' }, ['Current TINs fill new tire rows. Changing a batch here never changes existing loads.']),
+      tinFields
+    ]),
+    h('div', { class: 'modal-foot' }, [
+      h('button', { class: 'btn', onclick: function () { scrim.remove(); } }, ['Cancel']),
+      h('button', { class: 'btn primary', onclick: function () {
+        var seen = {};
+        state.tireStyles = ta.value.split('\n').map(function (x) { return x.trim(); }).filter(function (x) { return x && !seen[x] && (seen[x] = 1); });
+        state.tireTINs = tins;
+        markDirty(); scrim.remove(); toast('Tire sizes and current TINs saved');
+      } }, ['Save'])
+    ])
+  ]));
+  document.body.appendChild(scrim);
+  setTimeout(function () { ta.focus(); }, 0);
+}
+function tirePickerFor(ld) {
+  function addRow(styleTxt) {
+    if (!ld.tires) ld.tires = [];
+    if (styleTxt && ld.tires.some(function (t) { return (t.style || '').trim().toLowerCase() === styleTxt.trim().toLowerCase(); })) {
+      toast('This tire type is already on the load — update its quantity.');
+      return;
+    }
+    ld.tires.push({ id: uid(), style: styleTxt || '', lot: (state.tireTINs || {})[styleTxt] || '', qty: '' });
+    ld.updated = Date.now(); markDirty(); renderTires();
+    setTimeout(function () {
+      var rows = document.querySelectorAll('#tiresList .tirerow');
+      var last = rows[rows.length - 1];
+      if (last) { var inps = last.querySelectorAll('input'); (styleTxt ? inps[1] : inps[0]).focus(); }
+    }, 0);
+  }
+  var styles = state.tireStyles || [];
+  if (!styles.length) {
+    addRow('');
+    if (!isYard()) toast('Tip: save your common sizes under \u201cTire sizes\u2026\u201d on the home screen for one-tap picks');
+    return;
+  }
+  var scrim = h('div', { class: 'modal-scrim' });
+  scrim.appendChild(h('div', { class: 'modal small' }, [
+    h('div', { class: 'modal-head' }, [
+      h('h2', { style: 'font-size:17px' }, ['Add tire']),
+      h('button', { class: 'iconbtn', onclick: function () { scrim.remove(); } }, ['\u2715'])
+    ]),
+    h('div', { class: 'modal-body' }, [
+      h('div', { class: 'tirechips' }, styles.map(function (st) {
+        return h('button', { class: 'btn small', onclick: function () { scrim.remove(); addRow(st); } }, [st]);
+      }))
+    ]),
+    h('div', { class: 'modal-foot' }, [
+      isYard() ? null : h('button', { class: 'btn small ghost', onclick: function () { scrim.remove(); tireStylesModal(); } }, ['Edit sizes\u2026']),
+      h('button', { class: 'btn', onclick: function () { scrim.remove(); addRow(''); } }, ['Blank row']),
+      h('button', { class: 'btn', onclick: function () { scrim.remove(); } }, ['Cancel'])
+    ])
+  ]));
+  document.body.appendChild(scrim);
 }
 
 /* ---------- library view ---------- */
@@ -1101,6 +1944,7 @@ function renderLibrary(root) {
         h('div', { style: 'display:flex;gap:8px;align-items:center;flex-wrap:wrap' }, [
           folderOps,
           searchInp,
+          h('button', { class: 'btn small', onclick: startNewModel, title: 'Start a new model from a blank drawing canvas' }, ['+ New model']),
           h('button', { class: 'btn small', onclick: startImport }, ['Import DXF…']),
           h('button', { class: 'btn small', onclick: function () { go('home'); } }, ['Back to loads'])
         ])
@@ -1118,6 +1962,21 @@ function renderLibrary(root) {
     ])
   ]));
   if (bulkBar) root.appendChild(bulkBar);
+}
+
+/* ---------- new model from a blank canvas ---------- */
+function startNewModel() {
+  promptModal('Name for the new model', '', function (name) {
+    if (!name.trim()) return;
+    var np = {
+      id: uid(), name: name.trim(), kind: 'trailer', group: libState.cur || '',
+      polylines: [], ox: 0, oy: 0, width: 100, height: 50,
+      added: Date.now()
+    };
+    state.profiles.push(np);
+    goDraw(np.id);
+    toast('Blank canvas — draw the profile, then hit ✓ Save drawing');
+  }, 'e.g. 14\' Ghost');
 }
 
 /* ---------- DXF import ---------- */
@@ -1357,6 +2216,7 @@ function renderEditor(root, ld) {
     editor.redo = uiCache.redo || [];
     editor.pivots = uiCache.pivots || {};
   }
+  var prepMode = isYard() && ((ld.status || 'prep') === 'prep' || (ld.status || 'prep') === 'open');
   var wrap = h('div', { class: 'editor' });
 
   /* left palette: folder tree with checkboxes + quantities */
@@ -1446,6 +2306,7 @@ function renderEditor(root, ld) {
       renderPalette();
     });
     var row = h('div', { class: 'palrow' + (qty ? ' on' : ''), style: 'padding-left:' + (10 + depth * 14) + 'px', title: p.name + ' — ' + ftin(p.width) });
+    if(practiceSession)row.setAttribute('data-tour-trailer','true');
     row.appendChild(cb);
     var lbl = h('span', { class: 'prname' }, [p.name]);
     lbl.addEventListener('click', function () { cb.checked = !cb.checked; cb.dispatchEvent(new Event('change')); });
@@ -1537,10 +2398,10 @@ function renderEditor(root, ld) {
   var toolbar = h('div', { class: 'toolbar' }, [
     h('button', { class: 'tbtn mobileonly', title: 'Trailer palette', onclick: function () {
       right.classList.remove('open'); left.classList.toggle('open');
-    } }, ['📚']),
+    } }, ['Library']),
     h('button', { class: 'tbtn mobileonly', title: 'Load info, tires & photos', onclick: function () {
       left.classList.remove('open'); right.classList.toggle('open');
-    } }, ['ℹ️']),
+    } }, ['Load details']),
     tb('↶ Undo', function () { undo(); }, 'undoBtn'),
     tb('↷ Redo', function () { redo(); }, 'redoBtn'),
     h('div', { class: 'sep' }),
@@ -1567,6 +2428,13 @@ function renderEditor(root, ld) {
     b.textContent = label;
     return b;
   }
+  if (isYard()) {
+    Array.prototype.slice.call(toolbar.children).forEach(function (el) {
+      var t = el.textContent || '';
+      if (/Undo|Redo|Flip|Roll over|5\u00b0|^0\u00b0$|Auto stack|Duplicate|Remove|Library/.test(t) || el.className === 'sep') el.remove();
+      else if (/Measure/.test(t)) el.remove();
+    });
+  }
   canvasWrap.appendChild(toolbar);
 
   var statusbar = h('div', { class: 'statusbar', id: 'statusbar' });
@@ -1575,7 +2443,9 @@ function renderEditor(root, ld) {
   /* right inspector */
   function field(label, key, type, full) {
     var inp = type === 'textarea' ? h('textarea', { rows: 2 }) : h('input', { type: type || 'text' });
+    inp.setAttribute('aria-label', label);
     inp.value = ld[key] || '';
+    if (isYard() && key !== 'partsLocation') inp.disabled = true;
     inp.addEventListener('change', function () {
       ld[key] = inp.value; ld.updated = Date.now(); markDirty();
       renderTabs();   // load # may have changed — refresh the tab label
@@ -1586,26 +2456,73 @@ function renderEditor(root, ld) {
   var stackList = h('div', { class: 'stacklist', id: 'stackList' });
   var photoGrid = h('div', { class: 'photogrid', id: 'photoGrid' });
   var right = h('div', { class: 'panel right' }, [
+    prepMode ? h('div', { class: 'insp-section' }, [
+      h('div', { style: 'padding:10px 14px 4px' }, [
+        (function () {
+          var b = h('button', { class: 'btn primary', style: 'width:100%;justify-content:center;font-size:15px' });
+          function paint() { b.textContent = ld.prepped ? '\u2705 Prepped \u2014 tap to un-mark' : '\u2705 Mark as prepped'; b.classList.toggle('ghost', !!ld.prepped); }
+          paint();
+          b.addEventListener('click', function () {
+            ld.prepped = !ld.prepped; ld.updated = Date.now(); markDirty(); renderRoute();
+            toast(ld.prepped ? 'Marked prepped \u2014 the office can move it to stacking' : 'Un-marked');
+          });
+          return b;
+        })()
+      ])
+    ]) : null,
     h('div', { class: 'insp-section' }, [
       h('h3', null, ['Load info']),
       h('div', { class: 'formgrid' }, [
         field('Load #', 'loadNo'), field('Ship date', 'date', 'date'),
         field('Customer / destination', 'customer', 'text', true),
-        field('Notes for the yard', 'notes', 'textarea', true)
+        field('Address', 'address', 'textarea', true),
+        field('Notes for the yard', 'notes', 'textarea', true),
+        field('Parts location / prep notes', 'partsLocation', 'textarea', true),
+        (function () {
+          var sel = h('select', null, [
+            h('option', { value: 'stack' }, ['Stack']),
+            h('option', { value: 'semi' }, ['Semi'])
+          ]);
+          sel.value = ld.type || 'stack';
+          if (isYard()) sel.disabled = true;
+          sel.addEventListener('change', function () { ld.type = sel.value; ld.updated = Date.now(); markDirty(); });
+          return h('div', null, [h('label', null, ['Type']), sel]);
+        })(),
+        (function () {
+          var cb = h('input', { type: 'checkbox', style: 'width:16px;height:16px' });
+          cb.checked = !!ld.custPickup;
+          if (isYard()) cb.disabled = true;
+          cb.addEventListener('change', function () { ld.custPickup = cb.checked; ld.updated = Date.now(); markDirty(); });
+          return h('div', null, [h('label', null, ['Customer pickup']), h('div', { style: 'padding-top:6px' }, [cb])]);
+        })()
+      ]),
+      h('div', { class: 'bookline' }, [
+        workflowLabel(ld) + (ld.truckDate ? ' \u00b7 \ud83d\ude9a ' + bookingStr(ld) : '')
       ])
+    ]),
+    h('div', { class: 'insp-section' }, [
+      h('h3', null, ['Paperwork']),
+      h('div', { class: 'doclist', id: 'docList' }),
+      isYard() ? null : h('div', { class: 'photoadd' }, [
+        (function () {
+          var b = h('button', { class: 'btn small', style: 'width:100%;justify-content:center' }, ['+ Attach PDF']);
+          b.addEventListener('click', function () {attachLoadDocuments(ld,b,function(){renderDocs();renderItems();});});
+          return b;
+        })()
+      ])
+    ]),
+    h('div', { class: 'insp-section' }, [
+      h('h3', null, ['Parts on this load']),
+      h('div', { class: 'itemlist', id: 'itemList' })
     ]),
     h('div', { class: 'insp-section' }, [
       h('h3', null, ['Tires']),
       h('div', { class: 'tireslist', id: 'tiresList' }),
       h('div', { class: 'photoadd' }, [
-        h('button', { class: 'btn small', style: 'width:100%;justify-content:center', onclick: function () {
-          if (!ld.tires) ld.tires = [];
-          ld.tires.push({ id: uid(), style: '', lot: '', qty: '' });
-          ld.updated = Date.now(); markDirty(); renderTires();
-        } }, ['+ Add tire style'])
+        h('button', { class: 'btn small', style: 'width:100%;justify-content:center', onclick: function () { tirePickerFor(ld); } }, ['+ Add tire style'])
       ])
     ]),
-    h('div', { class: 'insp-section' }, [h('h3', null, ['Selected']), selPanel]),
+    isYard() ? null : h('div', { class: 'insp-section' }, [h('h3', null, ['Selected']), selPanel]),
     h('div', { class: 'insp-section' }, [h('h3', null, ['On this load']), stackList]),
     h('div', { class: 'insp-section' }, [
       h('h3', null, ['Photos of the stack']),
@@ -1620,16 +2537,87 @@ function renderEditor(root, ld) {
         } }, ['+ Add photos'])
       ])
     ]),
-    h('div', { class: 'insp-section' }, [
+    isYard() ? null : h('div', { class: 'insp-section' }, [
       h('h3', null, ['Keyboard']),
       h('div', { class: 'keymap', id: 'keyMap' })
     ])
   ]);
 
+  if (isYard()) {
+    left.style.display = 'none';
+    wrap.classList.add('yard-editor');
+  } else {
+    wrap.classList.add('admin-editor');
+    Array.from(right.children).forEach(function (section) {
+      var heading = section.querySelector('h3');
+      if (!heading) return;
+      var details = h('section', { class: 'load-detail-section' });
+      details.appendChild(h('h3', { class: 'load-detail-heading' }, [heading.textContent]));
+      heading.remove();
+      var content = h('div', { class: 'load-detail-content' });
+      while (section.firstChild) content.appendChild(section.firstChild);
+      details.appendChild(content);
+      section.replaceWith(details);
+    });
+    var libraryToggle = h('button', { class: 'tbtn desktop-library-toggle', 'aria-expanded': 'true', onclick: function () {
+      var collapsed = wrap.classList.toggle('library-collapsed');
+      libraryToggle.textContent = collapsed ? 'Show library' : 'Hide library';
+      libraryToggle.setAttribute('aria-expanded', String(!collapsed));
+      window.dispatchEvent(new Event('resize'));
+    } }, ['Hide library']);
+    toolbar.prepend(libraryToggle);
+  }
+  [left, right].forEach(function (panel) {
+    panel.prepend(h('button', { class: 'btn small mobileonly panel-close',
+      onclick: function () { panel.classList.remove('open'); }
+    }, ['Close panel ×']));
+  });
   wrap.appendChild(left);
   wrap.appendChild(canvasWrap);
   wrap.appendChild(right);
+  root.appendChild(h('div',{class:'load-workflow'},[
+    h('div',null,[h('b',null,[(ld.loadNo?'#'+ld.loadNo+' · ':'')+(ld.customer||'Load')]),h('span',{class:'workflow-badge stage-'+workflowStage(ld)},[workflowLabel(ld)])]),
+    h('p',null,[['Next: schedule preparation and confirm paperwork.','Next: gather parts and tires, then mark this load prepped.','Next: schedule stacking. Parts and tires are prepared.','Next: stack the load and record photos.','Next: confirm the pickup booking and hand off the load.','This load has left the yard.'][workflowStage(ld)]])
+  ]));
   root.appendChild(wrap);
+
+  if (!isYard()) {
+    wrap.classList.add('tabbed-editor');
+    var loadTabs = h('div', { class: 'load-page-tabs', role: 'tablist', 'aria-label': 'Load screens' });
+    var tabGroups = [
+      ['Stacking', []],
+      ['Load info', ['Load info', 'Paperwork', 'Parts on this load', 'Tires', 'Photos of the stack', 'Selected', 'On this load', 'Keyboard']]
+    ];
+    var pageButtons = [];
+    function selectLoadPage(index) {
+      wrap.classList.toggle('info-screen', index !== 0);
+      right.hidden = index === 0;
+      canvasWrap.hidden = index !== 0;
+      left.hidden = index !== 0;
+      Array.from(right.querySelectorAll('.load-detail-section')).forEach(function (section) {
+        section.hidden = tabGroups[index][1].indexOf(section.querySelector('h3').textContent) === -1;
+      });
+      pageButtons.forEach(function (button, i) {
+        button.setAttribute('aria-selected', String(i === index));
+        button.tabIndex = i === index ? 0 : -1;
+      });
+      if (index === 0) window.dispatchEvent(new Event('resize'));
+    }
+    tabGroups.forEach(function (group, index) {
+      var button = h('button', { class: 'load-page-tab', role: 'tab', onclick: function () { selectLoadPage(index); } }, [group[0]]);
+      button.addEventListener('keydown', function (event) {
+        var next = event.key === 'ArrowRight' ? (index + 1) % tabGroups.length : event.key === 'ArrowLeft' ? (index + tabGroups.length - 1) % tabGroups.length : event.key === 'Home' ? 0 : event.key === 'End' ? tabGroups.length - 1 : -1;
+        if (next >= 0) { event.preventDefault(); selectLoadPage(next); pageButtons[next].focus(); }
+      });
+      pageButtons.push(button); loadTabs.appendChild(button);
+    });
+    root.insertBefore(loadTabs, wrap);
+    // The page tabs replace the old mobile details drawer button.
+    Array.from(toolbar.querySelectorAll('button')).forEach(function (button) {
+      if (button.textContent === 'Load details') button.remove();
+    });
+    selectLoadPage(0);
+  }
 
   /* print block */
   var printBlock = h('div', { class: 'printonly', id: 'printBlock' });
@@ -1643,6 +2631,8 @@ function renderEditor(root, ld) {
   renderStackList();
   renderPhotos();
   renderTires();
+  renderDocs();
+  renderItems();
   renderKeyMap();
   if (hadViewport) applyViewport(); else fitView();
   syncUndoBtns();
@@ -1904,7 +2894,7 @@ function initCanvas(svg, wrapEl) {
       renderOverlay();
       return;
     }
-    var target = e.target.closest ? e.target.closest('.placement') : null;
+    var target = (!isYard() && e.target.closest) ? e.target.closest('.placement') : null;
     if (target) {
       var pid = target.getAttribute('data-id');
       var tpl = null;
@@ -1927,7 +2917,7 @@ function initCanvas(svg, wrapEl) {
         items: selPlacements().map(function (p) { return { pl: p, cx0: p.cx, cy0: p.cy }; }),
         startX: e.clientX, startY: e.clientY, moved: false
       };
-    } else if (e.shiftKey && e.pointerType !== 'touch') {
+    } else if (!isYard() && e.shiftKey && e.pointerType !== 'touch') {
       var rr = svg.getBoundingClientRect();
       dragState = { mode: 'marquee', x0: e.clientX - rr.left, y0: e.clientY - rr.top, x1: e.clientX - rr.left, y1: e.clientY - rr.top };
     } else {
@@ -2062,6 +3052,7 @@ function initCanvas(svg, wrapEl) {
   svg.addEventListener('pointerup', endPointer);
   svg.addEventListener('pointercancel', endPointer);
   svg.addEventListener('wheel', function (e) {
+    if (isYard()) return;
     e.preventDefault();
     var vp = editor.viewport;
     var factor = Math.pow(1.0015, -e.deltaY);
@@ -2078,6 +3069,7 @@ function initCanvas(svg, wrapEl) {
   /* keyboard */
   function keyHandler(e) {
     if (!editor) return;
+    if (isYard()) return;
     var tag = (document.activeElement && document.activeElement.tagName) || '';
     if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
     var k = e.key;
@@ -2535,6 +3527,40 @@ function renderStackList() {
     sl.appendChild(h('div', { class: 'srow' }, [h('span', null, [k]), h('b', null, ['× ' + counts[k]])]));
   });
 }
+function renderDocs() {
+  var dl = $('docList');
+  if (!dl || !editor) return;
+  var ld = editor.ld;
+  dl.innerHTML = '';
+  (ld.docs || []).forEach(function (d) {
+    var a = h('a', { class: 'docrow', target: '_blank', rel: 'noopener' }, ['\ud83d\udcc4 ' + (d.name || 'document.pdf')]);
+    RS_STORAGE.photoUrl(d.file).then(function (u) { if (u) a.href = u; });
+    var del = isYard() ? null : h('button', { class: 'tiredel', title: 'Remove', onclick: function (e) {
+      e.preventDefault();
+      confirmModal('Remove ' + (d.name || 'this PDF') + ' from the load?', function () {
+        RS_STORAGE.deletePhoto(d.file);
+        ld.docs = (ld.docs || []).filter(function (x) { return x !== d; });
+        ld.updated = Date.now(); markDirty(); renderDocs();
+      }, { okLabel: 'Remove', danger: true });
+    } }, ['\u00d7']);
+    dl.appendChild(h('div', { class: 'docline' }, [a, del]));
+  });
+  if (!(ld.docs || []).length) dl.appendChild(h('div', { class: 'tiresempty' }, ['No paperwork attached']));
+}
+function renderItems() {
+  var il = $('itemList');
+  if (!il || !editor) return;
+  var ld = editor.ld;
+  il.innerHTML = '';
+  (ld.items || []).forEach(function (it) {
+    il.appendChild(h('div', { class: 'itemrow' }, [
+      h('span', { class: 'ipart' }, [it.part || '']),
+      h('span', { class: 'idesc' }, [it.desc || '']),
+      h('b', { class: 'iqty' }, ['\u00d7 ' + (it.qty || 0)])
+    ]));
+  });
+  if (!(ld.items || []).length) il.appendChild(h('div', { class: 'tiresempty' }, ['No pick-list items \u2014 attach the ICIM pick list PDF']));
+}
 function renderTires() {
   var tl = $('tiresList');
   if (!tl || !editor) return;
@@ -2542,7 +3568,7 @@ function renderTires() {
   tl.innerHTML = '';
   (ld.tires || []).forEach(function (t) {
     function inp(key, ph, cls) {
-      var i = h('input', { type: 'text', placeholder: ph, class: cls || '' });
+      var i = h('input', { type: 'text', placeholder: ph, 'aria-label': ph, class: cls || '' });
       i.value = t[key] || '';
       i.addEventListener('change', function () { t[key] = i.value; ld.updated = Date.now(); markDirty(); });
       return i;
@@ -2551,7 +3577,11 @@ function renderTires() {
       ld.tires = (ld.tires || []).filter(function (x) { return x !== t; });
       ld.updated = Date.now(); markDirty(); renderTires();
     } }, ['×']);
-    tl.appendChild(h('div', { class: 'tirerow' }, [inp('style', 'Tire style / size'), inp('lot', 'Lot #'), inp('qty', 'Qty'), del]));
+    tl.appendChild(h('div', { class: 'tirerow' }, [
+      h('label', { class: 'tire-type' }, ['Tire type', inp('style', 'Tire style / size')]),
+      h('label', null, ['TIN', inp('lot', 'TIN')]),
+      h('label', null, ['Qty', inp('qty', 'Qty')]), del
+    ]));
   });
   if (!(ld.tires || []).length) tl.appendChild(h('div', { class: 'tiresempty' }, ['No tire info on this load yet']));
 }
@@ -2769,8 +3799,8 @@ function doPrint() {
   var pb = $('printBlock');
   pb.innerHTML =
     '<table class="ptitle"><tr>' +
-    '<td style="width:22%"><span class="lbl">Load</span><span class="big">' + esc(ld.loadNo ? '#' + ld.loadNo : '—') + '</span></td>' +
-    '<td style="width:30%"><span class="lbl">Customer / destination</span>' + esc(ld.customer || '—') + '</td>' +
+    '<td style="width:22%"><span class="lbl">Load \u00b7 ' + esc((ld.type || 'stack') === 'semi' ? 'Semi' : 'Stack') + (ld.custPickup ? ' \u00b7 CUSTOMER PICKUP' : '') + '</span><span class="big">' + esc(ld.loadNo ? '#' + ld.loadNo : '—') + '</span></td>' +
+    '<td style="width:30%"><span class="lbl">Customer / destination</span>' + esc(ld.customer || '—') + (ld.address ? '<br>' + esc(ld.address) : '') + '</td>' +
     '<td style="width:16%"><span class="lbl">Ship date</span>' + esc(ld.date || '—') + '</td>' +
     '<td><span class="lbl">Overall</span>' + (ext ? esc(ftin(ext.maxX - ext.minX)) + ' long · ' + esc(ftin(ext.maxY)) + ' top of load' : '—') + '</td>' +
     '<td style="width:18%"><span class="lbl">Sheet</span>Rice Trailers · Rice Stacker</td>' +
@@ -2779,7 +3809,7 @@ function doPrint() {
     '<td colspan="2"><span class="lbl">Notes</span>' + esc(ld.notes || '—') + '</td>' +
     '</tr>' + (function () {
       var ts = (ld.tires || []).filter(function (t) { return t.style || t.lot || t.qty; }).map(function (t) {
-        return [t.qty ? t.qty + ' ×' : '', t.style || '', t.lot ? 'Lot ' + t.lot : ''].filter(Boolean).join(' ');
+        return [t.qty ? t.qty + ' ×' : '', t.style || '', t.lot ? 'TIN ' + t.lot : ''].filter(Boolean).join(' ');
       }).join('   ·   ');
       return ts ? '<tr><td colspan="5"><span class="lbl">Tires</span>' + esc(ts) + '</td></tr>' : '';
     })() + '</table>';
@@ -3762,14 +4792,20 @@ function renderDrawEditor(root, profile) {
     openDrawTabs = openDrawTabs.filter(function (x) { return x !== profile.id; });
     window.__drawStash = null;
   }
+  function dropBlankHusk() {
+    // a brand-new model that was never saved has no polylines — don't leave it in the library
+    if (!profile.polylines.length) {
+      state.profiles = state.profiles.filter(function (p) { return p.id !== profile.id; });
+    }
+  }
   function cancelEdit() {
     if (drawDirty) {
       confirmModal('Discard unsaved drawing changes to "' + profile.name + '"?', function () {
-        closeOut(); cleanup(); go('library');
+        closeOut(); cleanup(); dropBlankHusk(); go('library');
       }, { okLabel: 'Discard', danger: true });
       return;
     }
-    closeOut(); cleanup(); go('library');
+    closeOut(); cleanup(); dropBlankHusk(); go('library');
   }
   function saveAsNew() {
     if (draft) finishDraft();
@@ -3858,6 +4894,27 @@ function renderDrawEditor(root, profile) {
 }
 
 /* ---------- header wiring ---------- */
+var practiceSession=null;
+function startGuidedTour(){
+  if(practiceSession||saving){toast('Wait for saving to finish, then open Help.');return;}
+  window.RS_TOUR({
+    begin:function(){
+      practiceSession={state:state,route:route,home:homeView,tabs:openLoadTabs.slice(),yard:viewAsYard};
+      state=JSON.parse(JSON.stringify(state));viewAsYard=false;homeView='board';openLoadTabs=[];
+      state.profiles=[{id:'practice-trailer',name:'Practice trailer — click to add',kind:'trailer',group:'',width:240,height:36,polylines:[[[0,0],[240,0],[240,36],[0,36],[0,0]]]}];state.folders=[];
+      state.loads=[{id:'practice-load',loadNo:'PRACTICE',customer:'Training only',notes:'Practice workspace — no real loads will be changed.',status:'open',type:'stack',prepped:false,placements:[],photos:[],tires:[{id:'practice-tire',style:'Sample tire',lot:'',qty:4}],items:[],docs:[],date:todayStr(),created:Date.now(),updated:Date.now()}];
+      go('home');$('saveChip').textContent='PRACTICE — nothing is saved';
+    },
+    end:function(){var saved=practiceSession;if(!saved)return;state=saved.state;route=saved.route;homeView=saved.home;openLoadTabs=saved.tabs;viewAsYard=saved.yard;practiceSession=null;renderRoute();if(dirty)markDirty();},
+    complete:function(){return RS_STORAGE.mock?Promise.resolve():RS_STORAGE.completeTour();}
+  });
+}
+window.RS_HELP_ACTIONS={tour:function(){if(!isYard())startGuidedTour();},guide:function(){window.RS_HELP(userRole(),currentUserEmail || 'preview',false);},canTour:function(){return !isYard();}};
+if (RS_STORAGE.mock) {
+  var demoRole = h('select', {'aria-label':'Preview role'}, ['admin','user','yard'].map(function(r){return h('option',{value:r},['Preview: '+r]);}));
+  demoRole.onchange=function(){RS_STORAGE.previewRole=demoRole.value;viewAsYard=false;go('home');};
+  document.querySelector('header.top').appendChild(demoRole);
+}
 $('brandHome').addEventListener('click', function () { go('home'); });
 $('btnLibrary').addEventListener('click', function () { go('library'); });
 $('btnSave').addEventListener('click', function () { manualSave = true; saveNow(); });
@@ -3870,4 +4927,19 @@ if (!RS_STORAGE.mock) {
 $('btnPrint').addEventListener('click', doPrint);
 
 boot();
+
+// Refresh the daily queue when an open yard screen crosses into a new day.
+var yardDisplayDate = todayStr();
+function refreshYardDay() {
+  var next = todayStr();
+  if (next !== yardDisplayDate && isYard() && route.view === 'home' &&
+      !document.hidden && !document.querySelector('.modal-scrim')) {
+    renderRoute();
+    yardDisplayDate = next;
+  }
+}
+setInterval(refreshYardDay, 60000);
+window.addEventListener('focus', refreshYardDay);
+document.addEventListener('visibilitychange', refreshYardDay);
 })();
+
