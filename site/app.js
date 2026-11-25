@@ -1734,6 +1734,7 @@ function renderHome(root) {
     if (ld.photos.length) files.push(ld.photos.length + ' photo' + (ld.photos.length > 1 ? 's' : ''));
     var sub = [ld.address, ld.notes].concat(files).filter(Boolean).join(' \u00b7 ');
     var badges = [h('span',{class:'workflow-badge stage-'+workflowStage(ld)},[workflowLabel(ld)])];
+    if (autoUnchecked(ld)) badges.push(h('span', { class: 'pill autotag', title: 'The app stacked this load from past loads. Nobody has checked it yet.' }, ['Auto stacked, not checked']));
     // Where the trailers are in production, straight from the ERP, for whoever is not on the floor.
     if (ep && ep.total && stat !== 'picked') {
       badges.push(erpChip(er));
@@ -2810,10 +2811,11 @@ function renderEditor(root, ld) {
   wrap.appendChild(canvasWrap);
   wrap.appendChild(right);
   root.appendChild(h('div',{class:'load-workflow'},[
-    h('div',null,[h('b',null,[(ld.loadNo?'#'+ld.loadNo+' · ':'')+(ld.customer||'Load')]),h('span',{class:'workflow-badge stage-'+workflowStage(ld)},[workflowLabel(ld)])]),
+    h('div',null,[h('b',null,[(ld.loadNo?'#'+ld.loadNo+' · ':'')+(ld.customer||'Load')]),h('span',{class:'workflow-badge stage-'+workflowStage(ld)},[workflowLabel(ld)]),h('span',{id:'autoTag',class:'autotagwrap'})]),
     h('p',null,[['Next: schedule preparation and confirm paperwork.','Next: gather parts and tires, then mark this load prepped.','Next: schedule stacking. Parts and tires are prepared.','Next: stack the load and record photos.','Next: confirm the pickup booking and hand off the load.','This load has left the yard.'][workflowStage(ld)]])
   ]));
   root.appendChild(wrap);
+  renderAutoTag();
 
   if (!isYard()) {
     wrap.classList.add('tabbed-editor');
@@ -2935,6 +2937,8 @@ function syncUndoBtns() {
   if (r) r.disabled = !editor.redo.length;
 }
 function afterMutate(skipSnapshot) {
+  if (!editor.autoRun) markChecked(editor.ld);
+  renderAutoTag();
   editor.ld.updated = Date.now();
   markDirty();
   renderPlacements();
@@ -3276,6 +3280,7 @@ function initCanvas(svg, wrapEl) {
     }));
   }
   function afterMutateNoSnapshot() {
+    markChecked(editor.ld); renderAutoTag();
     editor.ld.updated = Date.now();
     markDirty();
     renderStackList();
@@ -3892,6 +3897,25 @@ function heightMap(prof, fh) {
    columns, same flip on each layer, longer trailers where the crew put the longer ones. The exact
    heights are then settled from the drawings so nothing overlaps. Each load the crew fixes and moves
    on to stacking becomes one more example. */
+/* A load the app stacked and nobody has looked over yet. The tag clears when someone moves anything on
+   the sheet, presses "Looks right", or moves the load on to stacking. */
+function autoUnchecked(ld) {
+  if (!ld || workflowStage(ld) >= 3) return false;
+  var t = (ld.placements || []).filter(function (pl) { var pr = getProfile(pl.profileId); return pr && pr.kind !== 'truck'; });
+  return t.length > 0 && t.every(function (pl) { return pl.auto; });
+}
+function markChecked(ld) { (ld.placements || []).forEach(function (pl) { delete pl.auto; }); }
+function renderAutoTag() {
+  var el = $('autoTag');
+  if (!el || !editor) return;
+  el.innerHTML = '';
+  var ld = editor.ld;
+  if (!autoUnchecked(ld)) return;
+  el.appendChild(h('span', { class: 'pill autotag', title: 'The app stacked this load from past loads. Nobody has checked it yet.' }, ['Auto stacked, not checked']));
+  if (!isYard()) el.appendChild(h('button', { class: 'btn small', title: 'Use this when the stack is right as it is', onclick: function () {
+    markChecked(ld); ld.updated = Date.now(); markDirty(); renderAutoTag(); toast('Marked as checked');
+  } }, ['Looks right']));
+}
 function stackExamples(exceptId) {
   return state.loads.map(function (l) {
     if (l.id === exceptId) return null;
@@ -4036,6 +4060,9 @@ function autoStack(opts) {
   });
   if (!trailers.length) { toast('Nothing to stack — add some trailers first'); return; }
   if (!opts.noSnapshot) snapshot();
+  trailers.forEach(function (t) { t.pl.auto = 1; });
+  editor.autoRun = true;
+  setTimeout(function () { if (editor) editor.autoRun = false; }, 0);
   // Lay it out like the closest load the crew has stacked before, when there is one.
   var plan = opts.plain ? null : stackPlan(editor.ld, trailers, carrier);
   if (plan && plan.truck && !carrier) {
@@ -4105,7 +4132,6 @@ function autoStack(opts) {
     t.pl.fh = best.fh;
     t.pl.fv = false;
     t.pl.rot = 0;
-    if (plan) t.pl.auto = 1; else delete t.pl.auto;
     for (var b4 = 0; b4 < best.hm.n; b4++) {
       if (best.hm.T[b4] < -1e8) continue;
       var wb4 = Math.round(t.pl.cx + (b4 - best.half)) + OFF;
@@ -4215,7 +4241,7 @@ function doPrint() {
     '<td style="width:30%"><span class="lbl">Customer / destination</span>' + esc(ld.customer || '—') + (ld.address ? '<br>' + esc(ld.address) : '') + '</td>' +
     '<td style="width:16%"><span class="lbl">Ship date</span>' + esc(ld.date || '—') + '</td>' +
     '<td><span class="lbl">Overall</span>' + (ext ? esc(ftin(ext.maxX - ext.minX)) + ' long · ' + esc(ftin(ext.maxY)) + ' top of load' : '—') + '</td>' +
-    '<td style="width:18%"><span class="lbl">Sheet</span>Rice Trailers · Rice Stacker</td>' +
+    '<td style="width:18%"><span class="lbl">Sheet</span>Rice Trailers · Rice Stacker' + (autoUnchecked(ld) ? '<br><b>AUTO STACKED, NOT CHECKED</b>' : '') + '</td>' +
     '</tr><tr>' +
     '<td colspan="3"><span class="lbl">Stack</span>' + esc(stackStr) + '</td>' +
     '<td colspan="2"><span class="lbl">Notes</span>' + esc(ld.notes || '—') + '</td>' +

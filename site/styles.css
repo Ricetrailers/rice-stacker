@@ -647,3 +647,6 @@ header.top{height:auto;min-height:52px;flex-wrap:wrap;padding:10px 16px;gap:8px 
 .erpstrip .pill{display:inline-block;border-radius:99px;padding:3px 10px;font:500 12px/1.5 "IBM Plex Mono",monospace}
 .workflow-stages .boardsec.empty{padding:0;min-height:0}
 .workflow-stages .boardsec.empty .card-head{padding:8px 16px;margin:0;border-bottom:none}
+
+.pill.autotag{background:color-mix(in srgb,var(--bad) 13%,transparent);color:var(--bad);border:1px solid color-mix(in srgb,var(--bad) 38%,transparent);font-weight:600;white-space:nowrap;display:inline-block;border-radius:99px;padding:2px 9px;font-size:12px}
+.autotagwrap{display:inline-flex;align-items:center;gap:8px;margin-left:8px}
