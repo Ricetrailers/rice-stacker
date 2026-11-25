@@ -1,0 +1,25 @@
+name: Snapshot live site
+on:
+  push:
+    branches: [live-snapshot]
+    paths: ['.github/workflows/snapshot.yml']
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  snap:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download live site
+        run: |
+          rm -rf live && mkdir live && cd live
+          wget -q -r -l 2 -p -np -nH -e robots=off https://rice-stacker.netlify.app/ || true
+          ls -laR . | head -50
+      - name: Commit
+        run: |
+          git config user.name "snapshot-bot"
+          git config user.email "snapshot@users.noreply.github.com"
+          git add live
+          git commit -m "Snapshot of live rice-stacker.netlify.app" || exit 0
+          git push
