@@ -15,6 +15,8 @@ jobs:
         run: |
           rm -rf live && mkdir live && cd live
           wget -q -r -l 2 -p -np -nH -e robots=off https://rice-stacker.netlify.app/ || true
+          curl -fsS -o pdf.worker.min.js https://rice-stacker.netlify.app/pdf.worker.min.js || echo "no worker file"
+          rm -rf .netlify
           ls -laR . | head -50
       - name: Commit
         run: |
