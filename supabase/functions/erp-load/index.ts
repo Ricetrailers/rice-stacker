@@ -107,6 +107,42 @@ Deno.serve(async (req) => {
     return null;
   };
 
+  // Tire and axles for each trailer. The schedule export has them for every trailer still being built;
+  // each one seen is remembered by model, so finished trailers still get the usual tire for their model.
+  type Tire = { tire: string; axle: string };
+  const bySerial = new Map<string, Tire>();
+  const byModel = new Map<string, Tire>();
+  try {
+    const { data: known } = await supabase.from("rs_erp_tires").select("model_code,tire,axle");
+    for (const k of known ?? []) byModel.set(k.model_code as string, { tire: k.tire as string, axle: k.axle as string });
+    const sched = list<{ serial_number: string; model_code: string; tire_description: string | null; axle_type: string | null }>(
+      await call("production_schedule_export_with_order_ship_to_and_trailer_de", { production_date: iso(0), limit: 1000 }));
+    const fresh = new Map<string, Tire>();
+    for (const r of sched) {
+      if (!r.tire_description) continue;
+      const t = { tire: r.tire_description.trim(), axle: (r.axle_type ?? "").trim() };
+      if (r.serial_number) bySerial.set(r.serial_number, t);
+      if (r.model_code) { fresh.set(r.model_code, t); byModel.set(r.model_code, t); }
+    }
+    if (fresh.size) await supabase.from("rs_erp_tires").upsert([...fresh].map(([model_code, t]) => ({ model_code, ...t, seen_at: new Date().toISOString() })));
+  } catch (_) { /* tires are a nice-to-have; the load list must not fail over them */ }
+  // Weight rating of each model, so the app can pick the usual tire when the ERP has shown none yet.
+  const gvwr = new Map<string, number>();
+  try {
+    for (let offset = 0; offset < 3000; offset += 400) {
+      const page = list<{ model_code: string; gvwr: number | null }>(await call("list_models", { limit: 400, offset }));
+      for (const m of page) if (m.gvwr) gvwr.set(m.model_code, m.gvwr);
+      if (page.length < 400) break;
+    }
+  } catch (_) { /* same: never fail the load list over this */ }
+  const tireFor = (serial: string | null, model: string) => {
+    const g = gvwr.has(model) ? { gvwr: gvwr.get(model) } : {};
+    const s = serial ? bySerial.get(serial) : undefined;
+    if (s) return { ...g, tire: s.tire, axle: s.axle, tire_by: "erp" };
+    const m = byModel.get(model);
+    return m ? { ...g, tire: m.tire, axle: m.axle, tire_by: "model" } : g;
+  };
+
   const rowFor = async (head: ReturnType<typeof headOf>) => {
     const orders = list<ErpOrder>(await call("list_sales_orders_on_truck_loads", { load_number: head.load_no, limit: 100 }));
     const trailers = orders.filter((o) => o.model_code !== "PARTS").map((o) => {
@@ -115,6 +151,7 @@ Deno.serve(async (req) => {
         serial: o.serial_number ?? "", sales_order: o.sales_order, model_code: o.model_code, description: o.model_description,
         ...stageOf(o.production_status ?? ""), status: o.production_status ?? "",
         dry_weight: o.dry_weight ?? null, profile_id: p?.id ?? null, profile_name: p?.name ?? null,
+        ...tireFor(o.serial_number, o.model_code),
       };
     });
     return { load_no: head.load_no, head, trailers, parts_orders: orders.length - trailers.length, fetched_at: new Date().toISOString() };

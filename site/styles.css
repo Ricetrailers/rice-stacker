@@ -733,3 +733,16 @@ header.top{height:auto;min-height:52px;flex-wrap:wrap;padding:10px 16px;gap:8px 
   body.print-ship .photogrid{display:grid;grid-template-columns:repeat(3,1fr);gap:6px}
 }
 .shipsec .tiresempty{padding:10px 16px}
+
+/* view page, tire TIN and lug rows */
+.viewtitle{display:flex;align-items:flex-start;gap:12px;flex-wrap:wrap}
+.backbtn{font-weight:600}
+.viewbadges{display:flex;gap:6px;flex-wrap:wrap;margin:0 0 12px}
+.viewpic{padding:8px 14px 12px}
+.viewstack{display:block;width:100%;max-height:360px}
+.viewsec .shiprow{min-height:40px;padding:7px 16px;font-size:13px}
+.viewqty{font-weight:600;white-space:nowrap;font-size:13px}
+.erpstage.done{background:#e6f4ea;color:#1e6b34}.erpstage.wip{background:#fff4d6;color:#7a5600}.erpstage.todo{background:var(--line2);color:var(--muted)}
+.shiprow.sub2{min-height:40px;padding:6px 16px 6px 34px;border-top:0}
+.shiptin{flex:1;min-width:0;max-width:420px;text-transform:uppercase;font-family:ui-monospace,Menlo,monospace}
+.load-page-tab.backtab{font-weight:600}

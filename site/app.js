@@ -886,6 +886,11 @@ function renderRoute() {
     if (!sl) { go('home'); return; }
     renderShip(v, sl);
   }
+  else if (route.view === 'view') {
+    var vl = currentLoad();
+    if (!vl) { go('home'); return; }
+    renderView(v, vl);
+  }
   else if (route.view === 'editor') {
     var ld = currentLoad();
     if (!ld) { openLoadTabs = openLoadTabs.filter(function (x) { return x !== route.loadId; }); go('home'); return; }
@@ -1557,7 +1562,7 @@ function unschedPanel() {
       detail.appendChild(h('div',{class:'schedule-task'},[button,h('small',null,[label])]));
     });
     if(scheduleSelection)detail.appendChild(h('button',{class:'btn small ghost',onclick:function(){scheduleSelection=null;paint();}},['Cancel selection']));
-    detail.appendChild(h('button',{class:'btn small ghost',onclick:function(){scheduleSelection=null;go('editor',l.id);}},['Open load details']));
+    detail.appendChild(h('button',{class:'btn small ghost',onclick:function(){scheduleSelection=null;openLoad(l);}},['Open load details']));
   }
   function filter(){
     var query=scheduleLoadQuery.trim().toLowerCase();
@@ -1711,7 +1716,7 @@ function calendarEventDlg(ev) {
     h('div',{class:'modal-body',style:'display:grid;gap:14px'},[
       h('strong',null,[l.customer||'No customer']),field('Task',kind),field('Date',date),field('Time (optional)',time),field('Load progress',status),
       h('p',{class:'sub'},['Removing this appointment keeps the load, paperwork and other appointments. Changing progress updates the load across the app.']),feedback,
-      h('button',{class:'btn',onclick:function(){close();go('editor',l.id);}},['Open load']),
+      h('button',{class:'btn',onclick:function(){close();openLoad(l);}},['Open load']),
       readonly?null:save,readonly?null:remove
     ])
   ]));
@@ -1740,7 +1745,7 @@ function dayDetailDlg(iso) {
     evs.forEach(function (ev) {
       var l = ev.l;
       var kindName = ev.kind === 'pickup' ? (l.custPickup ? '\ud83c\udfe0 Customer pickup' : (isSemi(l) ? '\ud83d\ude9a Stack & ship' : '\ud83d\ude9a Pickup')) : names[ev.kind];
-      var row = h('div', { class: 'detrow' + (ev.done ? ' done' : ''), onclick: function () { scrim.remove(); go('editor', l.id); } }, [
+      var row = h('div', { class: 'detrow' + (ev.done ? ' done' : ''), onclick: function () { scrim.remove(); openLoad(l); } }, [
         h('span', { class: 'legdot ' + (ev.kind === 'pickup' && l.custPickup ? 'pickup-cust' : 'ev-' + ev.kind) + (ev.done ? ' done' : '') }),
         h('span', { class: 'dettime' }, [ev.time ? fmt12(ev.time) : '\u2014']),
         h('span', { class: 'detkind' }, [(ev.done ? '\u2713 ' : '') + kindName]),
@@ -1879,7 +1884,7 @@ function renderHome(root) {
         ])
       ]);
     }
-    row = h('div', { class: asCard ? 'loadcard' : 'loadrow', draggable: asCard && !isYard() ? 'true' : null, ondragstart: function (e) { if (!asCard || isYard()) return; e.dataTransfer.setData('text/plain', ld.id); e.dataTransfer.effectAllowed = 'move'; row.classList.add('dragging'); }, ondragend: function () { row.classList.remove('dragging'); }, 'data-tour-load': practiceSession ? 'true' : null, onclick: function () { if (stat === 'picked' && ld.ship && ld.ship.shippedAt) go('ship', ld.id); else go('editor', ld.id); } }, [
+    row = h('div', { class: asCard ? 'loadcard' : 'loadrow', draggable: asCard && !isYard() ? 'true' : null, ondragstart: function (e) { if (!asCard || isYard()) return; e.dataTransfer.setData('text/plain', ld.id); e.dataTransfer.effectAllowed = 'move'; row.classList.add('dragging'); }, ondragend: function () { row.classList.remove('dragging'); }, 'data-tour-load': practiceSession ? 'true' : null, onclick: function () { openLoad(ld); } }, [
       h('div', { class: 'lno' }, [ld.loadNo ? '#' + ld.loadNo : '(no #)', h('small', { title: er && er.head.ship_date ? 'Planned ship date in the ERP' : 'Ship date' }, [er && er.head.ship_date ? 'Ships ' + erpShip(er.head.ship_date) : ld.date || ''])]),
       h('div', { class: 'lcust' }, [ld.customer || h('span', { style: 'color:var(--muted);font-weight:400' }, ['No customer']), sub ? h('small', null, [sub.slice(0, 90)]) : null]),
       h('div', { class: 'lmeta' }, [h('span', { class: 'ltrl' + (ep && ep.total && trailerCount > ep.total ? ' over' : ''), title: ep && ep.total ? 'Trailers placed on the stack sheet, out of how many the ERP order has' : 'Trailers placed on the stack sheet' }, [ep && ep.total ? trailerCount + ' of ' + ep.total + ' placed' : trailerCount + ' trl'])].concat(badges)),
@@ -2866,6 +2871,7 @@ function renderEditor(root, ld) {
       h('h3', null, ['Tires']),
       h('div', { class: 'tireslist', id: 'tiresList' }),
       h('div', { class: 'photoadd' }, [
+        erpFor(ld) ? h('button', { class: 'btn small', style: 'width:100%;justify-content:center;margin-bottom:6px', title: 'Add the tires this load needs, from the trailers on the ERP order', onclick: function () { var r = fillTiresFromErp(ld); if (r.added) { ld.updated = Date.now(); markDirty(); renderTires(); } toast(!r.any ? 'No tire sizes on file for these trailers.' : r.added ? 'Tires filled in from the ERP order. Check the TINs.' : 'The tires are already on the list.'); } }, ['Fill tires from ERP']) : null,
         h('button', { class: 'btn small', style: 'width:100%;justify-content:center', onclick: function () { tirePickerFor(ld); } }, ['+ Add tire style'])
       ])
     ]),
@@ -2952,6 +2958,7 @@ function renderEditor(root, ld) {
       });
       if (index === 0) window.dispatchEvent(new Event('resize'));
     }
+    loadTabs.appendChild(h('button', { class: 'load-page-tab backtab', title: 'Back to the board', onclick: function () { go('home'); } }, ['← Board']));
     tabGroups.forEach(function (group, index) {
       var button = h('button', { class: 'load-page-tab', role: 'tab', onclick: function () { selectLoadPage(index); } }, [group[0]]);
       button.addEventListener('keydown', function (event) {
@@ -4059,7 +4066,134 @@ function partsLoadModal(partsNo, host) {
 
 /* ---------- ship out: check the load with the driver, sign, photograph, ship ----------
    Counts are typed in blank. The paperwork number is never shown, only whether the count matches. */
-function shipRec(ld) { if (!ld.ship || typeof ld.ship !== 'object') ld.ship = {}; var r = ld.ship; ['trailers', 'tires', 'items', 'partsLoads', 'sign'].forEach(function (k) { if (!r[k]) r[k] = {}; }); return r; }
+/* ---------- tires, wheels and lug nuts a load needs ----------
+   The ERP gives the tire and the axles for each trailer (t.tire, t.axle). When it has neither, the
+   weight rating in the model description picks the usual tire for that rating, and the screen says so. */
+var LUGS_BY_AXLE = { 2000: 5, 3500: 5, 5200: 6, 6000: 6, 7000: 8, 8000: 8, 10000: 8, 12000: 8 };
+function tireKey(s) { return (String(s || '').match(/\d+(\.\d+)?/g) || []).slice(0, 3).join('-'); }
+function tireSpec(t) {
+  var tire = t.tire || '', axle = t.axle || '', by = tire ? (t.tire_by || 'erp') : '';
+  if (!tire) {
+    var d = String(t.description || '').replace(/,/g, ''), m = d.match(/(\d{4,5})\s*#/), k = d.match(/\b(\d{1,2})K\b/i);
+    var gv = +t.gvwr || (m ? +m[1] : k ? +k[1] * 1000 : 0);
+    var pick = !gv ? null : gv <= 3500 ? ['ST-205-75R-15 6-PLY RADIAL', '1-3500'] : gv <= 7000 ? ['ST-205-75R-15 6-PLY RADIAL', '2-3500'] : gv <= 9990 ? ['ST-225-75R-15 8-PLY RADIAL', '2-5200'] : gv <= 14000 ? ['ST-235-80R-16 10-PLY RADIAL', '2-7000'] : gv <= 16000 ? ['ST-215-75R-17.5 LRH SINGLE', '2-8000'] : gv === 21000 ? ['ST-235-75R-17.5 LRJ SINGLE', '2-10000'] : null;
+    if (!pick) return null;
+    tire = pick[0]; axle = pick[1]; by = 'rating';
+  }
+  var am = String(axle).match(/^(\d)-(\d+)/), n = am ? +am[1] : 2, rating = am ? +am[2] : 0, dual = /DUAL/i.test(tire);
+  var per = LUGS_BY_AXLE[rating] || 0;
+  return { tire: tire, axles: n, rating: rating, dual: dual, wheels: n * 2 * (dual ? 2 : 1), lugsPer: per, lugs: n * 2 * per, by: by };
+}
+function loadTireNeeds(ld) {
+  var r = erpFor(ld), rows = [], idx = {}, unknown = 0;
+  ((r && r.trailers) || []).forEach(function (t) {
+    var sp = tireSpec(t);
+    if (!sp) { unknown++; return; }
+    var g = idx[sp.tire];
+    if (!g) { g = idx[sp.tire] = { style: sp.tire, qty: 0, lugs: 0, lugsPer: sp.lugsPer, trailers: 0, by: sp.by }; rows.push(g); }
+    g.qty += sp.wheels; g.lugs += sp.lugs; g.trailers++;
+    if (sp.by === 'rating') g.by = 'rating'; else if (sp.by === 'model' && g.by === 'erp') g.by = 'model';
+  });
+  return { rows: rows, unknown: unknown };
+}
+/* The tire lines for a load: what the crew typed on the stack sheet, plus anything the ERP says the
+   trailers need that is not typed in yet. */
+function shipTires(ld) {
+  var need = loadTireNeeds(ld), out = [], seen = {};
+  function defTin(style) { var tins = state.tireTINs || {}, k = tireKey(style), hit = tins[style] || ''; if (!hit) Object.keys(tins).forEach(function (n) { if (!hit && tireKey(n) === k) hit = tins[n]; }); return hit; }
+  (ld.tires || []).filter(function (t) { return t.style || t.qty; }).forEach(function (t) {
+    var k = tireKey(t.style), n = need.rows.filter(function (x) { return tireKey(x.style) === k; })[0];
+    seen[k] = 1;
+    out.push({ key: t.id, style: t.style || 'Tire', qty: t.qty !== '' && t.qty != null ? t.qty : (n ? n.qty : ''), tin: t.lot || defTin(t.style), lugs: n ? n.lugs : 0, lugsPer: n ? n.lugsPer : 0, trailers: n ? n.trailers : 0, by: n ? n.by : 'sheet' });
+  });
+  need.rows.forEach(function (n) { if (!seen[tireKey(n.style)]) out.push({ key: 'n:' + n.style, style: n.style, qty: n.qty, tin: defTin(n.style), lugs: n.lugs, lugsPer: n.lugsPer, trailers: n.trailers, by: n.by }); });
+  return { rows: out, unknown: need.unknown };
+}
+function tireSub(t) {
+  return [t.trailers ? 'For ' + t.trailers + ' trailer' + (t.trailers > 1 ? 's' : '') : '', t.by === 'rating' ? 'Size picked from the weight rating. Check it against the trailer.' : t.by === 'model' ? 'Size is the usual one for this model.' : t.by === 'sheet' ? 'Typed on the stack sheet' : ''].filter(Boolean).join(' · ');
+}
+/* Fill the stack sheet's tire lines from the ERP. Lines the crew typed are left alone. */
+function fillTiresFromErp(ld) {
+  var need = loadTireNeeds(ld), added = 0;
+  if (!ld.tires) ld.tires = [];
+  need.rows.forEach(function (n) {
+    var k = tireKey(n.style), have = ld.tires.filter(function (t) { return tireKey(t.style) === k; })[0];
+    if (have) { if (have.qty === '' || have.qty == null) { have.qty = String(n.qty); added++; } return; }
+    var tins = state.tireTINs || {}, tin = tins[n.style] || '';
+    if (!tin) Object.keys(tins).forEach(function (x) { if (!tin && tireKey(x) === k) tin = tins[x]; });
+    ld.tires.push({ id: uid(), style: n.style, lot: tin, qty: String(n.qty) }); added++;
+  });
+  return { added: added, unknown: need.unknown, any: need.rows.length };
+}
+/* A picture of the stack that cannot be moved, for the view page. */
+function stackPicture(ld) {
+  var ext = loadExtents(ld);
+  if (!ext) return null;
+  var pad = 14, w = ext.maxX - ext.minX, hh = ext.maxY - ext.minY;
+  var svg = svgEl('svg', { class: 'viewstack', viewBox: (ext.minX - pad) + ' ' + (-ext.maxY - pad) + ' ' + (w + pad * 2) + ' ' + (hh + pad * 2), preserveAspectRatio: 'xMidYMid meet' });
+  var g = svgEl('g', { transform: 'scale(1,-1)' });
+  ld.placements.forEach(function (pl) {
+    var prof = getProfile(pl.profileId);
+    if (!prof) return;
+    g.appendChild(svgEl('path', { d: profilePath(prof), transform: placementMatrix(pl, prof), fill: 'none', stroke: prof.kind === 'truck' ? 'var(--muted)' : 'var(--draw)', 'stroke-width': 1.3, 'vector-effect': 'non-scaling-stroke', 'stroke-linejoin': 'round' }));
+  });
+  svg.appendChild(g);
+  return svg;
+}
+function openLoad(ld) {
+  if ((ld.status || 'prep') === 'picked' && ld.ship && ld.ship.shippedAt) go('ship', ld.id);
+  else if (isYard()) go('editor', ld.id);
+  else go('view', ld.id);
+}
+/* ---------- look at a load without opening it for editing ---------- */
+function renderView(root, ld) {
+  var er = erpFor(ld), ext = loadExtents(ld), stage = workflowStage(ld), tires = shipTires(ld);
+  function card(title, kids, extra) { return h('div', { class: 'card shipsec viewsec' }, [h('div', { class: 'card-head' }, [h('h2', null, [title]), extra || null])].concat(kids)); }
+  function line(main, sub, right) { return h('div', { class: 'shiprow' }, [h('div', { class: 'shipmain' }, [h('b', null, [main]), sub ? h('small', null, [sub]) : null]), right || null]); }
+  var pic = stackPicture(ld);
+  var trailerRows = er && (er.trailers || []).length ? er.trailers.map(function (t) {
+    var st = erpStage(t);
+    return line(t.description || t.model_code, [t.serial ? 'Serial ' + t.serial : '', t.model_code, t.tire || ''].filter(Boolean).join(' · '), h('span', { class: 'pill erpstage ' + st.k }, [st.label]));
+  }) : shipTrailers(ld).map(function (t) { return line(t.title, t.sub); });
+  if (!trailerRows.length) trailerRows = [h('div', { class: 'tiresempty' }, ['No trailers on this load yet.'])];
+  var tireRows = tires.rows.map(function (t) {
+    return line(t.style, [tireSub(t), t.tin ? 'TIN ' + t.tin : 'No TIN yet'].filter(Boolean).join(' · '), h('span', { class: 'viewqty' }, [(t.qty !== '' ? t.qty + ' tires' : '') + (t.lugs ? ' · ' + t.lugs + ' lug nuts' : '')]));
+  });
+  if (tires.unknown) tireRows.push(h('div', { class: 'tiresempty' }, [tires.unknown + ' trailer' + (tires.unknown > 1 ? 's have' : ' has') + ' no tire size on file.']));
+  if (!tireRows.length) tireRows = [h('div', { class: 'tiresempty' }, ['No tire info on this load yet.'])];
+  var partRows = (ld.items || []).map(function (it) { return line((it.part ? it.part + '  ' : '') + (it.desc || ''), it.from ? 'From parts load #' + it.from : '', h('span', { class: 'viewqty' }, ['× ' + (it.qty || 0)])); });
+  if (ld.loadNo && erpLinksFor(ld.loadNo).length) partRows.unshift(h('div', { class: 'shiprow' }, [h('div', { class: 'cardlinks', style: 'flex:1' }, erpLinkLines(ld.loadNo, ld))]));
+  if (!partRows.length) partRows = [h('div', { class: 'tiresempty' }, ['No parts listed on this load.'])];
+  var grid = h('div', { class: 'photogrid shipphotos' });
+  (ld.photos || []).forEach(function (ph) {
+    var cell = h('div', { class: 'photocell', onclick: function () { getPhotoURL(ph, function (u) { if (u) openLightbox(u); }); } }), img = h('img', { alt: 'Load photo', loading: 'lazy' });
+    getPhotoURL(ph, function (u) { if (u) img.src = u; });
+    cell.appendChild(img); grid.appendChild(cell);
+  });
+  var notes = [er && er.head.notes, ld.notes].filter(Boolean).join('\n');
+  root.appendChild(h('div', { class: 'home shipwrap viewwrap' }, [h('div', { class: 'home-inner' }, [
+    h('div', { class: 'homehead' }, [
+      h('div', { class: 'viewtitle' }, [
+        h('button', { class: 'btn backbtn', onclick: function () { go('home'); } }, ['← Back to board']),
+        h('div', null, [h('h1', null, [(ld.loadNo ? '#' + ld.loadNo + ' · ' : '') + (ld.customer || 'No customer')]),
+          h('p', { class: 'sub' }, [[ld.address, er && er.head.ship_date ? 'Ships ' + erpShip(er.head.ship_date) : ld.date, er ? erpHow(er.head) : '', ld.truckDate ? 'Truck ' + bookingStr(ld) : ''].filter(Boolean).join(' · ')])])
+      ]),
+      h('div', { class: 'viewtoggle noprint' }, [
+        stage === 4 ? h('button', { class: 'btn primary', onclick: function () { go('ship', ld.id); } }, ['Ship load']) : null,
+        h('button', { class: 'btn', onclick: function () { go('editor', ld.id); } }, ['Edit stack sheet'])
+      ])
+    ]),
+    h('div', { class: 'viewbadges' }, [h('span', { class: 'workflow-badge stage-' + stage }, [workflowLabel(ld)]), stackLabel(ld), er ? erpChip(er) : null]),
+    notes ? h('div', { class: 'erpnote' }, [notes]) : null,
+    card('Stack', [pic ? h('div', { class: 'viewpic' }, [pic]) : h('div', { class: 'tiresempty' }, ['Not stacked yet.'])], ext ? h('span', { class: 'sub' }, [ftin(ext.maxX - ext.minX) + ' long · ' + ftin(ext.maxY) + ' top of load']) : null),
+    card('Trailers', trailerRows, er ? h('span', { class: 'sub' }, [erpProgressText(erpProgress(er))]) : null),
+    card('Tires, wheels and lug nuts', tireRows),
+    card('Parts', partRows),
+    (ld.photos || []).length ? card('Photos', [grid]) : null,
+    h('div', { class: 'shipfoot' }, [h('button', { class: 'btn backbtn', onclick: function () { go('home'); } }, ['← Back to board'])])
+  ])]));
+}
+function shipRec(ld) { if (!ld.ship || typeof ld.ship !== 'object') ld.ship = {}; var r = ld.ship; ['trailers', 'tires', 'tins', 'lugs', 'items', 'partsLoads', 'sign'].forEach(function (k) { if (!r[k]) r[k] = {}; }); return r; }
 function shipTrailers(ld) {
   var r = erpFor(ld);
   if (r && (r.trailers || []).length) return r.trailers.map(function (t, i) { return { key: t.serial || 'e' + i, title: t.description || t.model_code, sub: [t.serial ? 'Serial ' + t.serial : '', t.model_code].filter(Boolean).join(' · ') }; });
@@ -4083,7 +4217,8 @@ function signaturePad(onSave) {
 }
 function renderShip(root, ld) {
   var rec = shipRec(ld), done = !!rec.shippedAt, locked = done;
-  var trailers = shipTrailers(ld), tires = (ld.tires || []).filter(function (t) { return t.style || t.qty; }), items = ld.items || [];
+  var trailers = shipTrailers(ld), tireInfo = shipTires(ld), tires = tireInfo.rows, items = ld.items || [];
+  function tinOf(t) { return rec.tins[t.key] != null ? rec.tins[t.key] : (t.tin || ''); }
   var partsLinks = erpLinksFor(ld.loadNo).filter(function (k) { return k.sure && k.no && erp.rows[k.no] && erpKind(erp.rows[k.no]) === 'parts'; });
   function touch() { ld.updated = Date.now(); markDirty(); }
   function redraw() { root.innerHTML = ''; renderShip(root, ld); }
@@ -4117,7 +4252,7 @@ function renderShip(root, ld) {
         var path = 'loads/' + ld.id + '/sign/' + uid() + '.png';
         photoUrlCache[path] = URL.createObjectURL(blob);
         RS_STORAGE.uploadPhoto(path, blob, 'image/png').then(function () {
-          rec.sign[key] = { file: path, ts: Date.now(), name: key === 'rice' ? whoAmI() : (rec.driver || '') };
+          rec.sign[key] = { file: path, ts: Date.now(), name: rec.driver || '' };
           touch(); draw(); refreshFoot();
         }).catch(function (e) { delete photoUrlCache[path]; toast('Could not save the signature' + (e && e.message ? ': ' + e.message : ''), true); fail(); });
       }));
@@ -4126,7 +4261,7 @@ function renderShip(root, ld) {
     return box;
   }
   function section(n, title, rows, signKey) {
-    return h('div', { class: 'card shipsec' }, [h('div', { class: 'card-head' }, [h('h2', null, [n + '. ' + title])])].concat(rows).concat(signKey ? [signBlock(signKey, 'Driver', 'Driver: all items listed in this section are correct and on the load.')] : []));
+    return h('div', { class: 'card shipsec' }, [h('div', { class: 'card-head' }, [h('h2', null, [n + '. ' + title])])].concat(rows));
   }
   // 1. trailers
   var allBox = null;
@@ -4139,8 +4274,21 @@ function renderShip(root, ld) {
   if (!trailers.length) trRows = [h('div', { class: 'tiresempty' }, ['No trailers are listed for this load. Stack it or give it its ERP load number first.'])];
   else if (!locked) trRows.unshift(h('div', { class: 'shiprow' }, [h('button', { class: 'btn small', onclick: function () { trailers.forEach(function (t) { rec.trailers[t.key] = 1; }); touch(); redraw(); } }, ['All ' + trailers.length + ' are on the load'])]));
   // 2. tires and wheels
-  var tireRows = tires.map(function (t) { return countRow(t.style || 'Tire', t.lot ? 'TIN ' + t.lot : '', 'tires', t.id, t.qty); });
-  if (!tires.length) tireRows = [h('div', { class: 'tiresempty' }, ['No loose tires or wheels are listed on this load.'])];
+  var tireRows = [];
+  tires.forEach(function (t) {
+    tireRows.push(countRow(t.style, tireSub(t), 'tires', t.key, t.qty));
+    var tin = h('input', { class: 'shiptin', placeholder: 'TIN off the tire sidewall (DOT number)', 'aria-label': 'TIN for ' + t.style, autocapitalize: 'characters', disabled: locked || null }); tin.value = tinOf(t);
+    tin.addEventListener('keydown', function (e) { e.stopPropagation(); });
+    tin.addEventListener('change', function () { rec.tins[t.key] = tin.value.trim().toUpperCase(); tin.value = rec.tins[t.key]; touch(); refreshFoot(); });
+    tireRows.push(h('div', { class: 'shiprow sub2' }, [h('div', { class: 'shipmain' }, [h('small', null, ['TIN'])]), tin]));
+    if (t.lugs) {
+      var lb = h('input', { type: 'checkbox', class: 'shipcheck', disabled: locked || null }); lb.checked = !!rec.lugs[t.key];
+      lb.addEventListener('change', function () { if (lb.checked) rec.lugs[t.key] = t.lugs; else delete rec.lugs[t.key]; touch(); refreshFoot(); });
+      tireRows.push(h('label', { class: 'shiprow check sub2' }, [lb, h('div', { class: 'shipmain' }, [h('b', null, [t.lugs + ' lug nuts are with the load']), h('small', null, [t.lugsPer + ' per wheel'])])]));
+    }
+  });
+  if (tireInfo.unknown) tireRows.push(h('div', { class: 'tiresempty' }, [tireInfo.unknown + ' trailer' + (tireInfo.unknown > 1 ? 's have' : ' has') + ' no tire size on file. Add the tires on the stack sheet.']));
+  if (!tires.length && !tireInfo.unknown) tireRows = [h('div', { class: 'tiresempty' }, ['No tires or wheels are listed on this load.'])];
   // 3. parts
   var partRows = partsLinks.map(function (k) {
     var cb = h('input', { type: 'checkbox', class: 'shipcheck', disabled: locked || null });
@@ -4182,17 +4330,18 @@ function renderShip(root, ld) {
     var m = [], mism = 0;
     var unticked = trailers.filter(function (t) { return !rec.trailers[t.key]; }).length;
     if (!trailers.length) m.push('no trailers listed'); else if (unticked) m.push(unticked + ' trailer' + (unticked > 1 ? 's' : '') + ' not checked');
-    var uncounted = tires.filter(function (t) { return rec.tires[t.id] == null; }).length + items.filter(function (it, i) { return rec.items[(it.from || '') + ':' + (it.part || i) + ':' + i] == null; }).length;
+    var uncounted = tires.filter(function (t) { return rec.tires[t.key] == null; }).length + items.filter(function (it, i) { return rec.items[(it.from || '') + ':' + (it.part || i) + ':' + i] == null; }).length;
     if (uncounted) m.push(uncounted + ' count' + (uncounted > 1 ? 's' : '') + ' not entered');
     var pl = partsLinks.filter(function (k) { return !rec.partsLoads[k.no]; }).length;
     if (pl) m.push('parts load not confirmed');
-    if (!rec.sign.trailers) m.push('driver signature for trailers');
-    if (tires.length && !rec.sign.tires) m.push('driver signature for tires');
-    if ((items.length || partsLinks.length || rec.partsBox) && !rec.sign.parts) m.push('driver signature for parts');
+    var noTin = tires.filter(function (t) { return !tinOf(t); }).length;
+    if (noTin) m.push(noTin + ' TIN' + (noTin > 1 ? 's' : '') + ' not entered');
+    var noLug = tires.filter(function (t) { return t.lugs && !rec.lugs[t.key]; }).length;
+    if (noLug) m.push('lug nuts not checked');
     if (!rec.driver) m.push('driver name');
+    if (!rec.sign.driver) m.push('driver signature');
     if (!ld.photos.length) m.push('at least one photo');
-    if (!rec.sign.rice) m.push('Rice sign-off');
-    tires.forEach(function (t) { if (rec.tires[t.id] != null && t.qty !== '' && !isNaN(parseFloat(t.qty)) && parseFloat(rec.tires[t.id]) !== parseFloat(t.qty)) mism++; });
+    tires.forEach(function (t) { if (rec.tires[t.key] != null && t.qty !== '' && !isNaN(parseFloat(t.qty)) && parseFloat(rec.tires[t.key]) !== parseFloat(t.qty)) mism++; });
     items.forEach(function (it, i) { var v = rec.items[(it.from || '') + ':' + (it.part || i) + ':' + i]; if (v != null && !isNaN(parseFloat(it.qty)) && parseFloat(v) !== parseFloat(it.qty)) mism++; });
     return { list: m, mism: mism };
   }
@@ -4208,7 +4357,7 @@ function renderShip(root, ld) {
     var ms = missing();
     foot.appendChild(h('div', { class: 'shipmissing' }, [ms.list.length ? 'Still needed: ' + ms.list.join(', ') + '.' : ms.mism ? ms.mism + ' count' + (ms.mism > 1 ? 's do' : ' does') + ' not match the paperwork.' : 'Everything is checked and signed.']));
     foot.appendChild(h('button', { class: 'btn primary', disabled: ms.list.length ? 'disabled' : null, onclick: function () {
-      var shipIt = function () { rec.shippedAt = Date.now(); rec.shippedBy = whoAmI(); rec.mismatches = ms.mism; ld.status = 'picked'; ld.prepped = true; touch(); toast((ld.loadNo ? '#' + ld.loadNo : 'Load') + ' shipped. The record is under Shipped loads.'); go('home'); };
+      var shipIt = function () { tires.forEach(function (t) { if (rec.tins[t.key] == null && t.tin) rec.tins[t.key] = t.tin; }); rec.tireList = tires.map(function (t) { return { style: t.style, qty: t.qty, counted: rec.tires[t.key], tin: tinOf(t), lugs: t.lugs }; }); rec.shippedAt = Date.now(); rec.shippedBy = whoAmI(); rec.mismatches = ms.mism; ld.status = 'picked'; ld.prepped = true; touch(); toast((ld.loadNo ? '#' + ld.loadNo : 'Load') + ' shipped. The record is under Shipped loads.'); go('home'); };
       if (ms.mism) confirmModal(ms.mism + ' count' + (ms.mism > 1 ? 's do' : ' does') + ' not match the paperwork. Ship it anyway? The mismatch stays on the record.', shipIt, { okLabel: 'Ship anyway', danger: true }); else shipIt();
     } }, ['Ship load']));
   }
@@ -4216,16 +4365,17 @@ function renderShip(root, ld) {
   root.appendChild(h('div', { class: 'home shipwrap' }, [h('div', { class: 'home-inner' }, [
     h('div', { class: 'homehead' }, [
       h('div', null, [h('h1', null, [(done ? 'Shipped' : 'Ship out') + ' · ' + (ld.loadNo ? '#' + ld.loadNo : 'Load')]), h('p', { class: 'sub' }, [[ld.customer, ld.address, ld.truckDate ? 'Truck ' + bookingStr(ld) : ''].filter(Boolean).join(' · ')])]),
-      h('div', { class: 'viewtoggle noprint' }, [h('button', { class: 'btn', onclick: function () { go('home'); } }, ['← Board']), h('button', { class: 'btn ghost', onclick: function () { go('editor', ld.id); } }, ['Open stack sheet'])])
+      h('div', { class: 'viewtoggle noprint' }, [h('button', { class: 'btn backbtn', onclick: function () { go('home'); } }, ['← Back to board']), h('button', { class: 'btn ghost', onclick: function () { go(isYard() ? 'editor' : 'view', ld.id); } }, ['View load'])])
     ]),
     erpFor(ld) && erpFor(ld).head.notes ? h('div', { class: 'erpnote' }, [erpFor(ld).head.notes]) : null,
-    section(1, 'Trailers on the load', trRows, 'trailers'),
-    section(2, 'Tires and wheels', tireRows, tires.length ? 'tires' : null),
-    section(3, 'Parts', partRows, 'parts'),
+    section(1, 'Trailers on the load', trRows),
+    section(2, 'Tires, wheels and lug nuts', tireRows),
+    section(3, 'Parts', partRows),
     h('div', { class: 'card shipsec' }, [h('div', { class: 'card-head' }, [h('h2', null, ['4. Photos of the loaded truck']), addPhoto]), grid]),
-    h('div', { class: 'card shipsec' }, [h('div', { class: 'card-head' }, [h('h2', null, ['5. Sign off'])]),
+    h('div', { class: 'card shipsec' }, [h('div', { class: 'card-head' }, [h('h2', null, ['5. Driver signs for the load'])]),
       h('div', { class: 'shiprow' }, [driver, truck]),
-      signBlock('rice', 'Rice', 'Rice: this load was checked against the paperwork and photographed before it left.')]),
+      signBlock('driver', 'Driver', 'Driver: the trailers, tires, wheels, lug nuts and parts listed above are all on this load and correct.'),
+      h('div', { class: 'shiprow' }, [h('div', { class: 'shipmain' }, [h('small', null, [done ? 'Checked and shipped for Rice by ' + (rec.shippedBy || 'the yard') : 'Checked for Rice by ' + whoAmI() + '. Your name goes on the record when you press Ship load.'])])])]),
     foot
   ])]));
 }
