@@ -1024,6 +1024,74 @@ function erpChip(row) {
 }
 function erpShip(iso) { var m = String(iso || '').match(/^\d{4}-(\d\d)-(\d\d)/); return m ? (+m[1]) + '/' + (+m[2]) : ''; }
 function erpHow(head) { return head.cust_pickup ? 'Customer pickup' : head.ltype === 'semi' ? 'Semi' : 'Stack'; }
+/* What kind of ERP load this is, for the New load filter. */
+function erpKind(r) {
+  if (!(r.trailers || []).length) return /freight bill/i.test(r.head.notes || '') ? 'freight' : 'parts';
+  return r.head.cust_pickup ? 'pickup' : 'stack';
+}
+function erpIsOld(r) {
+  var s = r.head.ship_date;
+  return !!s && s < new Date(Date.now() - 14 * 86400000).toISOString().slice(0, 10);
+}
+/* Loads that go together. The office ties them in the ERP load notes ("has parts in load 20471",
+   "must go on load 20470", "picking up this load and load 20395"), so that is where this reads them. */
+var erpLinkCache = null;
+function erpLinkIndex() {
+  if (erpLinkCache) return erpLinkCache;
+  var idx = {}, known = {};
+  state.loads.forEach(function (l) { if (l.loadNo) known[String(l.loadNo).trim()] = 1; });
+  var add = function (a, b, text) { idx[a] = idx[a] || {}; if (!idx[a][b]) idx[a][b] = { no: b, text: text }; };
+  Object.keys(erp.rows).forEach(function (no) {
+    String(erp.rows[no].head.notes || '').split(/\n+/).forEach(function (line) {
+      var m = line.match(/\b\d{5}\b/g);
+      if (!m) return;
+      m.forEach(function (x) {
+        // A five digit number only counts as a load when the line says "load" or it is a load we know.
+        if (x === no || !(/load/i.test(line) || erp.rows[x] || known[x])) return;
+        add(no, x, line.trim()); add(x, no, line.trim());
+      });
+    });
+  });
+  erpLinkCache = idx;
+  return idx;
+}
+function erpLinksFor(no) {
+  no = String(no || '').trim();
+  var me = erp.rows[no], out = [];
+  if (!no || !erp.loaded) return out;
+  var idx = erpLinkIndex(), mine = idx[no] || {};
+  var meKind = me ? erpKind(me) : 'stack', hasParts = false;
+  Object.keys(mine).sort().forEach(function (x) {
+    var other = erp.rows[x], text = mine[x].text;
+    var kind = other ? erpKind(other) : /freight bill/i.test(text) ? 'freight' : /part/i.test(text) ? 'parts' : 'load';
+    var label;
+    if (meKind === 'parts' || meKind === 'freight') label = (meKind === 'freight' ? 'Freight bill for load #' : 'Goes on load #') + x;
+    else if (kind === 'freight') label = 'Freight bill is load #' + x;
+    else if (kind === 'parts') { label = 'Parts load #' + x + ' goes with this'; hasParts = true; }
+    else label = 'Goes out with load #' + x;
+    out.push({ no: x, sure: true, label: label, text: text });
+  });
+  if (me && meKind !== 'parts' && meKind !== 'freight') {
+    // Nothing tied in the notes: point at the same customer's open parts loads that are not tied to any load.
+    if (!hasParts) Object.keys(erp.rows).map(function (k) { return erp.rows[k]; }).filter(function (p) {
+      return p.head.erp_status === 'open' && erpKind(p) === 'parts' && p.head.customer_code === me.head.customer_code && !idx[p.load_no] && !erpIsOld(p);
+    }).slice(0, 3).forEach(function (p) {
+      out.push({ no: p.load_no, sure: false, label: 'Possible parts load #' + p.load_no, text: (p.head.notes || '').split(/\n/)[0] || 'Same customer, not tied to a load in the ERP notes' });
+    });
+    if (!hasParts && /has parts/i.test(me.head.notes || '')) out.push({ no: '', sure: true, label: 'Notes say this load has parts', text: 'No parts load number was given in the ERP notes.' });
+  }
+  return out;
+}
+function erpLinkLines(no) {
+  return erpLinksFor(no).map(function (k) {
+    return h('button', { class: 'erplink ' + (k.sure ? 'sure' : 'maybe'), title: k.text, onclick: function (e) {
+      e.stopPropagation();
+      if (!k.no) return;
+      var l = state.loads.filter(function (x) { return String(x.loadNo).trim() === k.no; })[0];
+      if (l) go('editor', l.id); else toast('Load #' + k.no + ' is not in Stacker yet. Add it under New load.');
+    } }, [k.label, k.sure ? null : h('small', null, [' · same customer'])]);
+  });
+}
 function erpChanged() {
   if (erpPickerRedraw) erpPickerRedraw();
   if (route.view === 'home' && !document.querySelector('.loadrow.open, .loadcard.open')) renderRoute();
@@ -1032,7 +1100,7 @@ function erpChanged() {
 function loadErp(thenSync) {
   if (!RS_STORAGE.erpLoads) return;
   RS_STORAGE.erpLoads().then(function (rows) {
-    erp.rows = {}; erp.at = 0;
+    erp.rows = {}; erp.at = 0; erpLinkCache = null;
     rows.forEach(function (r) { erp.rows[r.load_no] = r; var t = Date.parse(r.fetched_at) || 0; if (t > erp.at) erp.at = t; });
     erp.loaded = true; erp.error = '';
     erpChanged();
@@ -1056,7 +1124,7 @@ function erpLookup(no) {
   if (!RS_STORAGE.erpLoad || !no) return;
   toast('Looking up #' + no + ' in the ERP…');
   RS_STORAGE.erpLoad(String(no).trim()).then(function (res) {
-    if (res && res.found && res.row) { erp.rows[res.row.load_no] = res.row; erpChanged(); }
+    if (res && res.found && res.row) { erp.rows[res.row.load_no] = res.row; erpLinkCache = null; erpChanged(); }
     else toast(res && res.error ? res.error : 'The ERP has no load #' + no, true);
   }).catch(function () { toast('The ERP did not answer. Try again in a minute.', true); });
 }
@@ -1075,29 +1143,46 @@ function erpUnstarted() {
     return r.head && r.head.erp_status === 'open' && !have[r.load_no] && ((r.trailers || []).length || r.parts_orders);
   }).sort(function (a, b) { return (a.head.ship_date || '9').localeCompare(b.head.ship_date || '9') || a.load_no.localeCompare(b.load_no); });
 }
+var erpFilter = { kind: 'stack', old: false };
 function erpPicker(onPick) {
   var q = h('input', { placeholder: 'Search load # or customer', style: 'width:100%', 'aria-label': 'Search ERP loads' });
   var listEl = h('div', { class: 'erp-picklist' });
   var age = h('span', { class: 'erp-age' });
+  var chips = h('div', { class: 'erp-filters' });
   q.addEventListener('keydown', function (e) { e.stopPropagation(); });
+  var kinds = [['stack', 'To stack'], ['pickup', 'Customer pickup'], ['parts', 'Parts and freight'], ['all', 'Everything']];
+  function inKind(r, k) { var x = erpKind(r); return k === 'all' || (k === 'parts' ? x === 'parts' || x === 'freight' : x === k); }
   function draw() {
     if (!document.body.contains(listEl) && listEl.childNodes.length) { erpPickerRedraw = null; return; }
     age.textContent = erpAgeText();
-    listEl.innerHTML = '';
+    listEl.innerHTML = ''; chips.innerHTML = '';
     var term = q.value.trim().toLowerCase();
     var all = erpUnstarted();
-    var rows = term ? all.filter(function (r) { return (r.load_no + ' ' + (r.head.customer || '')).toLowerCase().indexOf(term) !== -1; }) : all;
+    // Searching looks through everything, so a load is never hidden from someone who knows its number.
+    var shown = term ? all : all.filter(function (r) { return erpFilter.old || !erpIsOld(r); });
+    kinds.forEach(function (k) {
+      var n = shown.filter(function (r) { return inKind(r, k[0]); }).length;
+      chips.appendChild(h('button', { class: 'btn small' + (erpFilter.kind === k[0] && !term ? ' primary' : ' ghost'), onclick: function () { erpFilter.kind = k[0]; q.value = ''; draw(); } }, [k[1] + ' · ' + n]));
+    });
+    var hidden = all.filter(erpIsOld).length;
+    if (hidden) {
+      var cb = h('input', { type: 'checkbox' }); cb.checked = erpFilter.old;
+      cb.addEventListener('change', function () { erpFilter.old = cb.checked; draw(); });
+      chips.appendChild(h('label', { class: 'erp-oldtoggle', title: 'Loads the ERP still lists as open with a ship date more than two weeks back. Most have already left.' }, [cb, ' Show ' + hidden + ' with a ship date over 2 weeks ago']));
+    }
+    var rows = term ? all.filter(function (r) { return (r.load_no + ' ' + (r.head.customer || '')).toLowerCase().indexOf(term) !== -1; }) : shown.filter(function (r) { return inKind(r, erpFilter.kind); });
     if (!rows.length) {
-      listEl.appendChild(h('div', { class: 'boardempty' }, [!erp.loaded ? 'Loading loads from the ERP…' : term ? 'No open ERP load matches “' + q.value.trim() + '”' : erp.error && !all.length ? 'Could not reach the ERP. Enter the load by hand below.' : 'Every open ERP load is already in Stacker']));
+      listEl.appendChild(h('div', { class: 'boardempty' }, [!erp.loaded ? 'Loading loads from the ERP…' : term ? 'No open ERP load matches “' + q.value.trim() + '”' : erp.error && !all.length ? 'Could not reach the ERP. Enter the load by hand below.' : all.length ? 'Nothing under this filter. Try another one above.' : 'Every open ERP load is already in Stacker']));
       return;
     }
     rows.slice(0, 80).forEach(function (r) {
-      var p = erpProgress(r), n = p.total;
+      var p = erpProgress(r), n = p.total, kind = erpKind(r), links = erpLinksFor(r.load_no);
       listEl.appendChild(h('button', { class: 'erp-pick', onclick: function () { onPick(r); } }, [
         h('span', { class: 'epno' }, ['#' + r.load_no]),
         h('span', { class: 'epmain' }, [
           h('b', null, [r.head.customer || 'No customer']),
-          h('small', null, [[r.head.ship_date ? 'Ships ' + erpShip(r.head.ship_date) : 'No ship date', erpHow(r.head), n ? n + (n === 1 ? ' trailer' : ' trailers') : 'Parts only'].join(' · ')])
+          h('small', null, [[r.head.ship_date ? 'Ships ' + erpShip(r.head.ship_date) : 'No ship date', kind === 'freight' ? 'Freight bill' : kind === 'parts' ? 'Parts only' : erpHow(r.head), n ? n + (n === 1 ? ' trailer' : ' trailers') : ''].filter(Boolean).join(' · ')]),
+          links.length ? h('small', { class: 'eplink' }, [links.map(function (k) { return k.label; }).join(' · ')]) : null
         ]),
         erpChip(r)
       ]));
@@ -1112,7 +1197,7 @@ function erpPicker(onPick) {
       h('b', null, ['Pick a load from the ERP']), age,
       h('button', { class: 'btn small ghost', title: 'Check the ERP again now', onclick: function () { syncErp(true); } }, ['↻ Refresh'])
     ]),
-    q, listEl
+    chips, q, listEl
   ]);
 }
 /* The stacking screen's "On the order" panel: what the ERP ordered against what is placed. */
@@ -1138,6 +1223,7 @@ function renderErpPanel() {
     h('small', null, [[erpWhereText(p), r.head.ship_date ? 'ships ' + erpShip(r.head.ship_date) : '', p.weight ? Math.round(p.weight).toLocaleString() + ' lb dry' : ''].filter(Boolean).join(' · ')])
   ]));
   if (r.head.notes) el.appendChild(h('div', { class: 'erpnote' }, [r.head.notes]));
+  if (erpLinksFor(ld.loadNo).length) el.appendChild(h('div', { class: 'cardlinks' }, erpLinkLines(ld.loadNo)));
   var missing = [];
   groups.forEach(function (g) {
     var need = g.list.length, have = g.profile ? Math.min(placed[g.key] || 0, need) : 0, gp = erpProgress({ trailers: g.list });
@@ -1790,6 +1876,7 @@ function renderHome(root) {
       h('div', { class: 'lno' }, [ld.loadNo ? '#' + ld.loadNo : '(no #)', h('small', { title: er && er.head.ship_date ? 'Planned ship date in the ERP' : 'Ship date' }, [er && er.head.ship_date ? 'Ships ' + erpShip(er.head.ship_date) : ld.date || ''])]),
       h('div', { class: 'lcust' }, [ld.customer || h('span', { style: 'color:var(--muted);font-weight:400' }, ['No customer']), sub ? h('small', null, [sub.slice(0, 90)]) : null]),
       h('div', { class: 'lmeta' }, [h('span', { class: 'ltrl' + (ep && ep.total && trailerCount > ep.total ? ' over' : ''), title: ep && ep.total ? 'Trailers placed on the stack sheet, out of how many the ERP order has' : 'Trailers placed on the stack sheet' }, [ep && ep.total ? trailerCount + ' of ' + ep.total + ' placed' : trailerCount + ' trl'])].concat(badges)),
+      asCard && ld.loadNo && stat !== 'picked' && erpLinksFor(ld.loadNo).length ? h('div', { class: 'cardlinks' }, erpLinkLines(ld.loadNo)) : null,
       btns
     ]);
     return row;
@@ -1854,12 +1941,12 @@ function renderHome(root) {
       h('div',{class:'viewtoggle'},[isYard()?null:h('button',{class:'btn primary',onclick:newLoad},['+ New load']),viewBtn('board',isYard()?'Daily view':'Overview'),viewBtn('cal','Schedule')])
     ]),
     isYard() || currentHomeView==='cal' ? null : (function () {
-      var waiting = erp.loaded ? erpUnstarted() : [], done = waiting.filter(function (r) { return erpProgress(r).ready; }).length;
+      var waiting = (erp.loaded ? erpUnstarted() : []).filter(function (r) { return erpKind(r) === 'stack' && !erpIsOld(r); }), done = waiting.filter(function (r) { return erpProgress(r).ready; }).length;
       var canPrep = active.filter(function (l) { var r = erpFor(l); return r && workflowStage(l) <= 1 && erpProgress(r).ready; }).length;
       return h('div', { class: 'erpstrip' }, [
         h('span', { class: 'erp-age' }, [erpAgeText()]),
         canPrep ? h('span', { class: 'pill prepped' }, [canPrep + (canPrep === 1 ? ' load is' : ' loads are') + ' fully built and can be prepped']) : null,
-        waiting.length ? h('button', { class: 'btn small', onclick: newLoad }, [waiting.length + ' ERP load' + (waiting.length === 1 ? '' : 's') + ' not started here' + (done ? ' \u00b7 ' + done + ' fully built' : '')]) : null,
+        waiting.length ? h('button', { class: 'btn small', onclick: newLoad }, [waiting.length + ' ERP load' + (waiting.length === 1 ? '' : 's') + ' to stack, not started here' + (done ? ' \u00b7 ' + done + ' fully built' : '')]) : null,
         h('button', { class: 'btn small ghost', title: 'Check the ERP again now', onclick: function () { syncErp(true); } }, ['\u21bb'])
       ]);
     })(),
@@ -4284,7 +4371,7 @@ function doPrint() {
     '<td style="width:18%"><span class="lbl">Sheet</span>Rice Trailers · Rice Stacker' + (autoUnchecked(ld) ? '<br><b>AUTO STACKED, NOT CHECKED</b>' : '') + '</td>' +
     '</tr><tr>' +
     '<td colspan="3"><span class="lbl">Stack</span>' + esc(stackStr) + '</td>' +
-    '<td colspan="2"><span class="lbl">Notes</span>' + esc(ld.notes || '—') + '</td>' +
+    '<td colspan="2"><span class="lbl">Notes</span>' + esc(ld.notes || '—') + erpLinksFor(ld.loadNo).filter(function (k) { return k.sure; }).map(function (k) { return '<br><b>' + esc(k.label) + '</b>'; }).join('') + '</td>' +
     '</tr>' + (function () {
       var ts = (ld.tires || []).filter(function (t) { return t.style || t.lot || t.qty; }).map(function (t) {
         return [t.qty ? t.qty + ' ×' : '', t.style || '', t.lot ? 'TIN ' + t.lot : ''].filter(Boolean).join(' ');
