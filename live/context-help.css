@@ -1,0 +1,7 @@
+.context-help-menu{position:fixed;right:16px;top:64px;z-index:100010;background:white;color:#17212b;padding:16px;border:1px solid #d5d9dd;border-radius:10px;box-shadow:0 8px 30px #0003;width:min(320px,calc(100vw - 32px));line-height:1.45}
+.context-help-menu[hidden]{display:none}.context-help-menu button{margin:4px}.context-help-menu p{margin:8px 0}
+.context-help-dot{position:fixed;z-index:100005;border:2px solid white;background:#1565ad;color:white;border-radius:50%;width:23px;height:23px;padding:0;line-height:19px;font-size:14px;font-weight:700;box-shadow:0 1px 4px #0005;cursor:help}
+.context-help-dot:focus-visible{outline:3px solid #ffb400;outline-offset:2px}
+.context-help-flyout{position:fixed;z-index:100020;width:min(310px,calc(100vw - 16px));padding:16px;background:#fff;color:#17212b;border:2px solid #1565ad;border-radius:10px;box-shadow:0 8px 30px #0004;line-height:1.5;max-height:70vh;overflow:auto}
+.context-help-flyout p{margin:8px 0}
+.context-help-menu{top:auto;bottom:16px}

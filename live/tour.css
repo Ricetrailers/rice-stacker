@@ -1,0 +1,8 @@
+.rs-tour{position:fixed;inset:0;z-index:100000;pointer-events:none}
+.rs-tour-ring{position:fixed;border:3px solid #ffcc4d;border-radius:7px;box-shadow:0 0 0 9999px rgba(0,0,0,.72);pointer-events:none;transition:top .12s,left .12s}
+.rs-tour-target{outline:3px solid #ffcc4d!important;outline-offset:3px}
+.rs-tour-card{position:fixed;right:16px;bottom:16px;width:min(390px,calc(100vw - 32px));padding:20px;background:#fff;color:#17212b;border:2px solid #ffcc4d;border-radius:12px;box-shadow:0 8px 40px #0009;pointer-events:auto;max-height:43vh;overflow:auto;line-height:1.5}
+.rs-tour-card h2{font-size:23px;color:#17212b;margin:8px 0}
+.rs-tour-card p{margin:8px 0}.rs-tour-card button{margin:6px 6px 0 0}
+.rs-tour-card p:first-child{font-size:12px;font-weight:700;letter-spacing:.06em}
+.rs-tour-card{left:16px;right:auto}
