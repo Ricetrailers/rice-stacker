@@ -881,6 +881,11 @@ function renderRoute() {
     if (openDrawTabs.indexOf(prof0.id) === -1) openDrawTabs.push(prof0.id);
     renderDrawEditor(v, prof0);
   }
+  else if (route.view === 'ship') {
+    var sl = currentLoad();
+    if (!sl) { go('home'); return; }
+    renderShip(v, sl);
+  }
   else if (route.view === 'editor') {
     var ld = currentLoad();
     if (!ld) { openLoadTabs = openLoadTabs.filter(function (x) { return x !== route.loadId; }); go('home'); return; }
@@ -1082,11 +1087,13 @@ function erpLinksFor(no) {
   }
   return out;
 }
-function erpLinkLines(no) {
+function erpLinkLines(no, host) {
   return erpLinksFor(no).map(function (k) {
     return h('button', { class: 'erplink ' + (k.sure ? 'sure' : 'maybe'), title: k.text, onclick: function (e) {
       e.stopPropagation();
       if (!k.no) return;
+      var other = erp.rows[k.no];
+      if (other && !(other.trailers || []).length) { partsLoadModal(k.no, host && String(host.loadNo).trim() !== k.no ? host : null); return; }
       var l = state.loads.filter(function (x) { return String(x.loadNo).trim() === k.no; })[0];
       if (l) go('editor', l.id); else toast('Load #' + k.no + ' is not in Stacker yet. Add it under New load.');
     } }, [k.label, k.sure ? null : h('small', null, [' · same customer'])]);
@@ -1223,7 +1230,7 @@ function renderErpPanel() {
     h('small', null, [[erpWhereText(p), r.head.ship_date ? 'ships ' + erpShip(r.head.ship_date) : '', p.weight ? Math.round(p.weight).toLocaleString() + ' lb dry' : ''].filter(Boolean).join(' · ')])
   ]));
   if (r.head.notes) el.appendChild(h('div', { class: 'erpnote' }, [r.head.notes]));
-  if (erpLinksFor(ld.loadNo).length) el.appendChild(h('div', { class: 'cardlinks' }, erpLinkLines(ld.loadNo)));
+  if (erpLinksFor(ld.loadNo).length) el.appendChild(h('div', { class: 'cardlinks' }, erpLinkLines(ld.loadNo, ld)));
   var missing = [];
   groups.forEach(function (g) {
     var need = g.list.length, have = g.profile ? Math.min(placed[g.key] || 0, need) : 0, gp = erpProgress({ trailers: g.list });
@@ -1872,11 +1879,12 @@ function renderHome(root) {
         ])
       ]);
     }
-    row = h('div', { class: asCard ? 'loadcard' : 'loadrow', draggable: asCard && !isYard() ? 'true' : null, ondragstart: function (e) { if (!asCard || isYard()) return; e.dataTransfer.setData('text/plain', ld.id); e.dataTransfer.effectAllowed = 'move'; row.classList.add('dragging'); }, ondragend: function () { row.classList.remove('dragging'); }, 'data-tour-load': practiceSession ? 'true' : null, onclick: function () { go('editor', ld.id); } }, [
+    row = h('div', { class: asCard ? 'loadcard' : 'loadrow', draggable: asCard && !isYard() ? 'true' : null, ondragstart: function (e) { if (!asCard || isYard()) return; e.dataTransfer.setData('text/plain', ld.id); e.dataTransfer.effectAllowed = 'move'; row.classList.add('dragging'); }, ondragend: function () { row.classList.remove('dragging'); }, 'data-tour-load': practiceSession ? 'true' : null, onclick: function () { if (stat === 'picked' && ld.ship && ld.ship.shippedAt) go('ship', ld.id); else go('editor', ld.id); } }, [
       h('div', { class: 'lno' }, [ld.loadNo ? '#' + ld.loadNo : '(no #)', h('small', { title: er && er.head.ship_date ? 'Planned ship date in the ERP' : 'Ship date' }, [er && er.head.ship_date ? 'Ships ' + erpShip(er.head.ship_date) : ld.date || ''])]),
       h('div', { class: 'lcust' }, [ld.customer || h('span', { style: 'color:var(--muted);font-weight:400' }, ['No customer']), sub ? h('small', null, [sub.slice(0, 90)]) : null]),
       h('div', { class: 'lmeta' }, [h('span', { class: 'ltrl' + (ep && ep.total && trailerCount > ep.total ? ' over' : ''), title: ep && ep.total ? 'Trailers placed on the stack sheet, out of how many the ERP order has' : 'Trailers placed on the stack sheet' }, [ep && ep.total ? trailerCount + ' of ' + ep.total + ' placed' : trailerCount + ' trl'])].concat(badges)),
-      asCard && ld.loadNo && stat !== 'picked' && erpLinksFor(ld.loadNo).length ? h('div', { class: 'cardlinks' }, erpLinkLines(ld.loadNo)) : null,
+      asCard && ld.loadNo && stat !== 'picked' && erpLinksFor(ld.loadNo).length ? h('div', { class: 'cardlinks' }, erpLinkLines(ld.loadNo, ld)) : null,
+      asCard && (workflowStage(ld) === 4 || (stat === 'picked' && ld.ship && ld.ship.shippedAt)) ? h('button', { class: 'btn small primary shipbtn', onclick: function (e) { e.stopPropagation(); go('ship', ld.id); } }, ['Ship load']) : null,
       btns
     ]);
     return row;
@@ -1902,7 +1910,7 @@ function renderHome(root) {
   var pickedRows = [];
   var pickedWrap = h('div', { class: 'card boardsec' }, [
     h('div', { class: 'card-head' }, [
-      h('h2', null, ['Picked up \u00b7 ' + picked.length]),
+      h('h2', null, ['Shipped loads \u00b7 ' + picked.length]),
       picked.length ? h('button', { class: 'btn small ghost', onclick: function (e) {
         var el = e.target;
         var body = el.closest('.card').querySelector('.pickedbody');
@@ -2927,7 +2935,7 @@ function renderEditor(root, ld) {
     var loadTabs = h('div', { class: 'load-page-tabs', role: 'tablist', 'aria-label': 'Load screens' });
     var tabGroups = [
       ['Stacking', []],
-      ['Load info', ['Load info', 'Paperwork', 'Parts on this load', 'Tires', 'Photos of the stack', 'Selected', 'On this load', 'Keyboard']]
+      ['Load info', ['Load info', 'Paperwork', 'Parts on this load', 'Tires', 'Selected', 'On this load', 'Keyboard']]
     ];
     var pageButtons = [];
     function selectLoadPage(index) {
@@ -2952,6 +2960,7 @@ function renderEditor(root, ld) {
       });
       pageButtons.push(button); loadTabs.appendChild(button);
     });
+    loadTabs.appendChild(h('button', { class: 'load-page-tab', title: 'Check the load with the driver, sign, photograph and ship', onclick: function () { go('ship', ld.id); } }, ['Ship out']));
     root.insertBefore(loadTabs, wrap);
     // The page tabs replace the old mobile details drawer button.
     Array.from(toolbar.querySelectorAll('button')).forEach(function (button) {
@@ -3900,7 +3909,7 @@ function renderItems() {
   (ld.items || []).forEach(function (it) {
     il.appendChild(h('div', { class: 'itemrow' }, [
       h('span', { class: 'ipart' }, [it.part || '']),
-      h('span', { class: 'idesc' }, [it.desc || '']),
+      h('span', { class: 'idesc' }, [(it.desc || '') + (it.from ? '  (parts load #' + it.from + ')' : '')]),
       h('b', { class: 'iqty' }, ['\u00d7 ' + (it.qty || 0)])
     ]));
   });
@@ -3995,6 +4004,230 @@ function heightMap(prof, fh) {
   var out = { B: B, T: T, n: n, w: w };
   hmCache[key] = out;
   return out;
+}
+/* ---------- parts loads: no stacking, just what is in them ---------- */
+function partsItemsOn(ld, partsNo) { return (ld.items || []).filter(function (it) { return it.from === partsNo; }); }
+function partsLoadModal(partsNo, host) {
+  var r = erp.rows[partsNo], scrim = h('div', { class: 'modal-scrim' }), body = h('div', { class: 'modal-body' });
+  function close() { scrim.remove(); }
+  function draw() {
+    body.innerHTML = '';
+    var kind = r ? erpKind(r) : 'parts';
+    if (r) body.appendChild(h('div', { class: 'pl-head' }, [
+      h('b', null, [r.head.customer || '']),
+      h('small', null, [[r.head.ship_date ? 'Ships ' + erpShip(r.head.ship_date) : '', kind === 'freight' ? 'Freight bill, nothing to load' : 'Parts only, nothing to stack', erpHow(r.head)].filter(Boolean).join(' · ')])
+    ]));
+    else body.appendChild(h('div', { class: 'tiresempty' }, ['Load #' + partsNo + ' is not in the ERP list right now.']));
+    if (r && r.head.notes) body.appendChild(h('div', { class: 'erpnote' }, [r.head.notes]));
+    var items = host ? partsItemsOn(host, partsNo) : [];
+    body.appendChild(h('h3', { class: 'pl-h' }, ['What is in it']));
+    if (items.length) items.forEach(function (it) {
+      body.appendChild(h('div', { class: 'itemrow' }, [h('span', { class: 'ipart' }, [it.part || '']), h('span', { class: 'idesc' }, [it.desc || '']), h('b', { class: 'iqty' }, ['× ' + (it.qty || 0)])]));
+    });
+    else body.appendChild(h('div', { class: 'tiresempty' }, [kind === 'freight' ? 'This one is a freight bill. There are no parts to load.' : 'The ERP only says “miscellaneous parts” for this load. Attach its pick list to see the parts.']));
+    if (host && !isYard() && kind !== 'freight') {
+      var b = h('button', { class: 'btn small', style: 'width:100%;justify-content:center;margin-top:8px' }, [items.length ? 'Replace with another pick list (PDF)' : '📎 Attach the pick list for #' + partsNo + ' (PDF)']);
+      b.addEventListener('click', function () {
+        var inp = h('input', { type: 'file', accept: 'application/pdf', style: 'display:none' });
+        inp.addEventListener('change', function () {
+          var f = inp.files[0]; inp.remove(); if (!f) return;
+          b.disabled = true; b.textContent = 'Reading…';
+          parsePickList(f).then(function (out) {
+            if (!out.items.length) { toast('No parts could be read from that PDF.', true); draw(); return; }
+            host.items = (host.items || []).filter(function (it) { return it.from !== partsNo; }).concat(out.items.map(function (it) { return Object.assign({}, it, { from: partsNo }); }));
+            host.updated = Date.now(); markDirty();
+            uploadDoc(host, f, 'Parts load #' + partsNo + ' pick list', function () { renderDocs(); });
+            toast(out.items.length + ' parts from #' + partsNo + ' added to ' + (host.loadNo ? '#' + host.loadNo : 'this load'));
+            renderItems(); draw();
+          }).catch(function () { toast('That PDF could not be read as a pick list.', true); draw(); });
+        });
+        document.body.appendChild(inp); inp.click();
+      });
+      body.appendChild(b);
+      if (items.length) body.appendChild(h('p', { class: 'sub', style: 'margin:8px 0 0' }, ['These parts also show under Parts on load ' + (host.loadNo ? '#' + host.loadNo : '') + ' and on its ship-out check.']));
+    }
+  }
+  draw();
+  scrim.appendChild(h('div', { class: 'modal small' }, [
+    h('div', { class: 'modal-head' }, [h('h2', { style: 'font-size:17px' }, [(r && erpKind(r) === 'freight' ? 'Freight bill' : 'Parts load') + ' #' + partsNo + (host && host.loadNo ? ' · goes on #' + host.loadNo : '')]), h('button', { class: 'iconbtn', onclick: close }, ['✕'])]),
+    body,
+    h('div', { class: 'modal-foot' }, [h('button', { class: 'btn', onclick: close }, ['Close'])])
+  ]));
+  scrim.addEventListener('click', function (e) { if (e.target === scrim) close(); });
+  document.body.appendChild(scrim);
+}
+
+/* ---------- ship out: check the load with the driver, sign, photograph, ship ----------
+   Counts are typed in blank. The paperwork number is never shown, only whether the count matches. */
+function shipRec(ld) { if (!ld.ship || typeof ld.ship !== 'object') ld.ship = {}; var r = ld.ship; ['trailers', 'tires', 'items', 'partsLoads', 'sign'].forEach(function (k) { if (!r[k]) r[k] = {}; }); return r; }
+function shipTrailers(ld) {
+  var r = erpFor(ld);
+  if (r && (r.trailers || []).length) return r.trailers.map(function (t, i) { return { key: t.serial || 'e' + i, title: t.description || t.model_code, sub: [t.serial ? 'Serial ' + t.serial : '', t.model_code].filter(Boolean).join(' · ') }; });
+  var out = [];
+  (ld.placements || []).forEach(function (pl) { var pr = getProfile(pl.profileId); if (pr && pr.kind !== 'truck') out.push({ key: pl.id, title: pr.name, sub: 'From the stack sheet' }); });
+  return out;
+}
+function signaturePad(onSave) {
+  var cv = h('canvas', { class: 'sigpad', width: 560, height: 170 }), ctx = cv.getContext('2d'), down = false, inked = false;
+  ctx.lineWidth = 2.4; ctx.lineCap = 'round'; ctx.lineJoin = 'round'; ctx.strokeStyle = '#111';
+  function pt(e) { var b = cv.getBoundingClientRect(); return [(e.clientX - b.left) * cv.width / b.width, (e.clientY - b.top) * cv.height / b.height]; }
+  cv.addEventListener('pointerdown', function (e) { e.preventDefault(); cv.setPointerCapture(e.pointerId); down = true; var q = pt(e); ctx.beginPath(); ctx.moveTo(q[0], q[1]); });
+  cv.addEventListener('pointermove', function (e) { if (!down) return; e.preventDefault(); var q = pt(e); ctx.lineTo(q[0], q[1]); ctx.stroke(); inked = true; });
+  ['pointerup', 'pointercancel', 'pointerleave'].forEach(function (ev) { cv.addEventListener(ev, function () { down = false; }); });
+  var save = h('button', { class: 'btn small primary', onclick: function () {
+    if (!inked) { toast('Sign in the box first.', true); return; }
+    save.disabled = true;
+    cv.toBlob(function (blob) { onSave(blob, function () { save.disabled = false; }); }, 'image/png');
+  } }, ['Save signature']);
+  return h('div', { class: 'sigwrap' }, [cv, h('div', { class: 'sigbtns' }, [h('button', { class: 'btn small', onclick: function () { ctx.clearRect(0, 0, cv.width, cv.height); inked = false; } }, ['Clear']), save])]);
+}
+function renderShip(root, ld) {
+  var rec = shipRec(ld), done = !!rec.shippedAt, locked = done;
+  var trailers = shipTrailers(ld), tires = (ld.tires || []).filter(function (t) { return t.style || t.qty; }), items = ld.items || [];
+  var partsLinks = erpLinksFor(ld.loadNo).filter(function (k) { return k.sure && k.no && erp.rows[k.no] && erpKind(erp.rows[k.no]) === 'parts'; });
+  function touch() { ld.updated = Date.now(); markDirty(); }
+  function redraw() { root.innerHTML = ''; renderShip(root, ld); }
+  function when(ts) { return new Date(ts).toLocaleString(undefined, { month: 'numeric', day: 'numeric', hour: 'numeric', minute: '2-digit' }); }
+  function matchTag(counted, expected) {
+    if (counted === '' || counted == null) return h('span', { class: 'shipmatch' }, ['']);
+    if (expected === '' || expected == null || isNaN(parseFloat(expected))) return h('span', { class: 'shipmatch ok' }, ['Counted']);
+    return parseFloat(counted) === parseFloat(expected) ? h('span', { class: 'shipmatch ok' }, ['✓ Matches']) : h('span', { class: 'shipmatch bad' }, ['Does not match the paperwork. Count again.']);
+  }
+  function countRow(title, sub, table, key, expected) {
+    var inp = h('input', { type: 'number', inputmode: 'numeric', min: 0, class: 'shipcount', placeholder: 'Count', 'aria-label': 'Counted ' + title, disabled: locked || null });
+    inp.value = rec[table][key] == null ? '' : rec[table][key];
+    var tag = h('span', null, [matchTag(inp.value, expected)]);
+    inp.addEventListener('keydown', function (e) { e.stopPropagation(); });
+    inp.addEventListener('change', function () { if (inp.value === '') delete rec[table][key]; else rec[table][key] = inp.value; tag.innerHTML = ''; tag.appendChild(matchTag(inp.value, expected)); touch(); refreshFoot(); });
+    return h('div', { class: 'shiprow' }, [h('div', { class: 'shipmain' }, [h('b', null, [title]), sub ? h('small', null, [sub]) : null]), inp, tag]);
+  }
+  function signBlock(key, who, statement) {
+    var box = h('div', { class: 'shipsign' });
+    function draw() {
+      box.innerHTML = '';
+      var sg = rec.sign[key];
+      box.appendChild(h('p', { class: 'shipstmt' }, [statement]));
+      if (sg && sg.file) {
+        var img = h('img', { class: 'sigimg', alt: who + ' signature' });
+        getPhotoURL({ file: sg.file }, function (u) { if (u) img.src = u; });
+        box.appendChild(img);
+        box.appendChild(h('div', { class: 'sigmeta' }, [who + (sg.name ? ' · ' + sg.name : '') + ' · signed ' + when(sg.ts), locked ? null : h('button', { class: 'btn small ghost', onclick: function () { delete rec.sign[key]; touch(); draw(); refreshFoot(); } }, ['Sign again'])]));
+      } else if (locked) box.appendChild(h('div', { class: 'tiresempty' }, ['Not signed']));
+      else box.appendChild(signaturePad(function (blob, fail) {
+        var path = 'loads/' + ld.id + '/sign/' + uid() + '.png';
+        photoUrlCache[path] = URL.createObjectURL(blob);
+        RS_STORAGE.uploadPhoto(path, blob, 'image/png').then(function () {
+          rec.sign[key] = { file: path, ts: Date.now(), name: key === 'rice' ? whoAmI() : (rec.driver || '') };
+          touch(); draw(); refreshFoot();
+        }).catch(function (e) { delete photoUrlCache[path]; toast('Could not save the signature' + (e && e.message ? ': ' + e.message : ''), true); fail(); });
+      }));
+    }
+    draw();
+    return box;
+  }
+  function section(n, title, rows, signKey) {
+    return h('div', { class: 'card shipsec' }, [h('div', { class: 'card-head' }, [h('h2', null, [n + '. ' + title])])].concat(rows).concat(signKey ? [signBlock(signKey, 'Driver', 'Driver: all items listed in this section are correct and on the load.')] : []));
+  }
+  // 1. trailers
+  var allBox = null;
+  var trRows = trailers.map(function (t) {
+    var cb = h('input', { type: 'checkbox', class: 'shipcheck', disabled: locked || null });
+    cb.checked = !!rec.trailers[t.key];
+    cb.addEventListener('change', function () { if (cb.checked) rec.trailers[t.key] = 1; else delete rec.trailers[t.key]; touch(); refreshFoot(); });
+    return h('label', { class: 'shiprow check' }, [cb, h('div', { class: 'shipmain' }, [h('b', null, [t.title]), h('small', null, [t.sub])])]);
+  });
+  if (!trailers.length) trRows = [h('div', { class: 'tiresempty' }, ['No trailers are listed for this load. Stack it or give it its ERP load number first.'])];
+  else if (!locked) trRows.unshift(h('div', { class: 'shiprow' }, [h('button', { class: 'btn small', onclick: function () { trailers.forEach(function (t) { rec.trailers[t.key] = 1; }); touch(); redraw(); } }, ['All ' + trailers.length + ' are on the load'])]));
+  // 2. tires and wheels
+  var tireRows = tires.map(function (t) { return countRow(t.style || 'Tire', t.lot ? 'TIN ' + t.lot : '', 'tires', t.id, t.qty); });
+  if (!tires.length) tireRows = [h('div', { class: 'tiresempty' }, ['No loose tires or wheels are listed on this load.'])];
+  // 3. parts
+  var partRows = partsLinks.map(function (k) {
+    var cb = h('input', { type: 'checkbox', class: 'shipcheck', disabled: locked || null });
+    cb.checked = !!rec.partsLoads[k.no];
+    cb.addEventListener('change', function () { if (cb.checked) rec.partsLoads[k.no] = 1; else delete rec.partsLoads[k.no]; touch(); refreshFoot(); });
+    return h('label', { class: 'shiprow check' }, [cb, h('div', { class: 'shipmain' }, [h('b', null, ['Parts load #' + k.no + ' is on this truck']), h('small', null, [partsItemsOn(ld, k.no).length ? partsItemsOn(ld, k.no).length + ' parts listed below' : 'Its parts are not listed yet. Attach its pick list from the load card.'])])]);
+  });
+  items.forEach(function (it, i) { partRows.push(countRow((it.part ? it.part + '  ' : '') + (it.desc || ''), it.from ? 'From parts load #' + it.from : '', 'items', (it.from || '') + ':' + (it.part || i) + ':' + i, it.qty)); });
+  var pb = h('input', { type: 'checkbox', class: 'shipcheck', disabled: locked || null }); pb.checked = !!rec.partsBox;
+  pb.addEventListener('change', function () { rec.partsBox = pb.checked; touch(); });
+  var loc = h('input', { placeholder: 'Where the loose parts are, like “hardware box, back stack”', style: 'flex:1;min-width:0', disabled: locked || null }); loc.value = ld.partsLocation || '';
+  loc.addEventListener('keydown', function (e) { e.stopPropagation(); });
+  loc.addEventListener('change', function () { ld.partsLocation = loc.value.trim(); touch(); });
+  partRows.push(h('label', { class: 'shiprow check' }, [pb, h('div', { class: 'shipmain' }, [h('b', null, ['Hardware and parts box is on the load'])])]));
+  partRows.push(h('div', { class: 'shiprow' }, [loc]));
+  // 4. photos
+  var grid = h('div', { class: 'photogrid shipphotos' });
+  function drawPhotos() {
+    grid.innerHTML = '';
+    ld.photos.forEach(function (ph) {
+      var cell = h('div', { class: 'photocell', onclick: function () { getPhotoURL(ph, function (u) { if (u) openLightbox(u); }); } }), img = h('img', { alt: 'Load photo', loading: 'lazy' });
+      getPhotoURL(ph, function (u) { if (u) img.src = u; });
+      cell.appendChild(img);
+      if (!locked) cell.appendChild(h('button', { class: 'del', title: 'Delete photo', onclick: function (e) { e.stopPropagation(); confirmModal('Delete this photo?', function () { removePhotoFile(ph); ld.photos = ld.photos.filter(function (x) { return x.id !== ph.id; }); touch(); drawPhotos(); refreshFoot(); }, { okLabel: 'Delete', danger: true }); } }, ['✕']));
+      grid.appendChild(cell);
+    });
+    if (!ld.photos.length) grid.appendChild(h('div', { style: 'grid-column:1/-1;color:var(--muted);font-size:13px' }, ['No photos yet. Take them once the truck is loaded.']));
+  }
+  drawPhotos();
+  var addPhoto = locked ? null : h('button', { class: 'btn', onclick: function () { $('photoFile').value = ''; $('photoFile').onchange = function () { addPhotos(ld, $('photoFile').files, function () { drawPhotos(); refreshFoot(); }); }; $('photoFile').click(); } }, ['+ Take or add photos']);
+  // 5. sign off
+  var driver = h('input', { placeholder: 'Driver name (printed)', style: 'flex:1;min-width:0', disabled: locked || null }); driver.value = rec.driver || '';
+  var truck = h('input', { placeholder: 'Trucking company', style: 'flex:1;min-width:0', disabled: locked || null }); truck.value = ld.truckCo || '';
+  [driver, truck].forEach(function (el) { el.addEventListener('keydown', function (e) { e.stopPropagation(); }); });
+  driver.addEventListener('change', function () { rec.driver = driver.value.trim(); touch(); refreshFoot(); });
+  truck.addEventListener('change', function () { ld.truckCo = truck.value.trim(); touch(); });
+  // what is still missing
+  function missing() {
+    var m = [], mism = 0;
+    var unticked = trailers.filter(function (t) { return !rec.trailers[t.key]; }).length;
+    if (!trailers.length) m.push('no trailers listed'); else if (unticked) m.push(unticked + ' trailer' + (unticked > 1 ? 's' : '') + ' not checked');
+    var uncounted = tires.filter(function (t) { return rec.tires[t.id] == null; }).length + items.filter(function (it, i) { return rec.items[(it.from || '') + ':' + (it.part || i) + ':' + i] == null; }).length;
+    if (uncounted) m.push(uncounted + ' count' + (uncounted > 1 ? 's' : '') + ' not entered');
+    var pl = partsLinks.filter(function (k) { return !rec.partsLoads[k.no]; }).length;
+    if (pl) m.push('parts load not confirmed');
+    if (!rec.sign.trailers) m.push('driver signature for trailers');
+    if (tires.length && !rec.sign.tires) m.push('driver signature for tires');
+    if ((items.length || partsLinks.length || rec.partsBox) && !rec.sign.parts) m.push('driver signature for parts');
+    if (!rec.driver) m.push('driver name');
+    if (!ld.photos.length) m.push('at least one photo');
+    if (!rec.sign.rice) m.push('Rice sign-off');
+    tires.forEach(function (t) { if (rec.tires[t.id] != null && t.qty !== '' && !isNaN(parseFloat(t.qty)) && parseFloat(rec.tires[t.id]) !== parseFloat(t.qty)) mism++; });
+    items.forEach(function (it, i) { var v = rec.items[(it.from || '') + ':' + (it.part || i) + ':' + i]; if (v != null && !isNaN(parseFloat(it.qty)) && parseFloat(v) !== parseFloat(it.qty)) mism++; });
+    return { list: m, mism: mism };
+  }
+  var foot = h('div', { class: 'shipfoot' });
+  function refreshFoot() {
+    foot.innerHTML = '';
+    if (done) {
+      foot.appendChild(h('div', { class: 'shipdone' }, ['Shipped ' + when(rec.shippedAt) + ' by ' + (rec.shippedBy || 'the yard') + (rec.mismatches ? ' · ' + rec.mismatches + ' count' + (rec.mismatches > 1 ? 's' : '') + ' did not match the paperwork' : '')]));
+      foot.appendChild(h('button', { class: 'btn', onclick: function () { document.body.classList.add('print-ship'); setTimeout(function () { window.print(); setTimeout(function () { document.body.classList.remove('print-ship'); }, 400); }, 60); } }, ['Print or save as PDF']));
+      if (!isYard()) foot.appendChild(h('button', { class: 'btn ghost', onclick: function () { confirmModal('Reopen this load? It goes back to Ready to ship and the record can be changed.', function () { delete rec.shippedAt; delete rec.shippedBy; ld.status = 'ready'; touch(); go('ship', ld.id); }, { okLabel: 'Reopen' }); } }, ['Reopen']));
+      return;
+    }
+    var ms = missing();
+    foot.appendChild(h('div', { class: 'shipmissing' }, [ms.list.length ? 'Still needed: ' + ms.list.join(', ') + '.' : ms.mism ? ms.mism + ' count' + (ms.mism > 1 ? 's do' : ' does') + ' not match the paperwork.' : 'Everything is checked and signed.']));
+    foot.appendChild(h('button', { class: 'btn primary', disabled: ms.list.length ? 'disabled' : null, onclick: function () {
+      var shipIt = function () { rec.shippedAt = Date.now(); rec.shippedBy = whoAmI(); rec.mismatches = ms.mism; ld.status = 'picked'; ld.prepped = true; touch(); toast((ld.loadNo ? '#' + ld.loadNo : 'Load') + ' shipped. The record is under Shipped loads.'); go('home'); };
+      if (ms.mism) confirmModal(ms.mism + ' count' + (ms.mism > 1 ? 's do' : ' does') + ' not match the paperwork. Ship it anyway? The mismatch stays on the record.', shipIt, { okLabel: 'Ship anyway', danger: true }); else shipIt();
+    } }, ['Ship load']));
+  }
+  refreshFoot();
+  root.appendChild(h('div', { class: 'home shipwrap' }, [h('div', { class: 'home-inner' }, [
+    h('div', { class: 'homehead' }, [
+      h('div', null, [h('h1', null, [(done ? 'Shipped' : 'Ship out') + ' · ' + (ld.loadNo ? '#' + ld.loadNo : 'Load')]), h('p', { class: 'sub' }, [[ld.customer, ld.address, ld.truckDate ? 'Truck ' + bookingStr(ld) : ''].filter(Boolean).join(' · ')])]),
+      h('div', { class: 'viewtoggle noprint' }, [h('button', { class: 'btn', onclick: function () { go('home'); } }, ['← Board']), h('button', { class: 'btn ghost', onclick: function () { go('editor', ld.id); } }, ['Open stack sheet'])])
+    ]),
+    erpFor(ld) && erpFor(ld).head.notes ? h('div', { class: 'erpnote' }, [erpFor(ld).head.notes]) : null,
+    section(1, 'Trailers on the load', trRows, 'trailers'),
+    section(2, 'Tires and wheels', tireRows, tires.length ? 'tires' : null),
+    section(3, 'Parts', partRows, 'parts'),
+    h('div', { class: 'card shipsec' }, [h('div', { class: 'card-head' }, [h('h2', null, ['4. Photos of the loaded truck']), addPhoto]), grid]),
+    h('div', { class: 'card shipsec' }, [h('div', { class: 'card-head' }, [h('h2', null, ['5. Sign off'])]),
+      h('div', { class: 'shiprow' }, [driver, truck]),
+      signBlock('rice', 'Rice', 'Rice: this load was checked against the paperwork and photographed before it left.')]),
+    foot
+  ])]));
 }
 /* ---------- learning from the loads the crew already stacked ----------
    Nothing is trained or stored. Every time a load is auto stacked, the app looks at the loads saved in

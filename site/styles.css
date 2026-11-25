@@ -700,3 +700,36 @@ header.top{height:auto;min-height:52px;flex-wrap:wrap;padding:10px 16px;gap:8px 
 .erplink small{font-weight:400}
 .erplink:hover{filter:brightness(.96)}
 .erp-pick .epmain b{white-space:normal;overflow:visible;overflow-wrap:anywhere}
+
+/* ---------- parts load flyout and ship out ---------- */
+.pl-head b{display:block;font-size:15px}.pl-head small{color:var(--muted)}
+.pl-h{font:600 11.5px/1 Barlow,sans-serif;letter-spacing:.13em;text-transform:uppercase;color:var(--muted);margin:14px 0 6px}
+.loadcard .shipbtn{align-self:flex-start}
+.shipwrap{overflow:auto}
+.shipwrap .home-inner{max-width:860px}
+.shipsec{margin-bottom:14px;padding-bottom:6px}
+.shipsec .card-head{display:flex;align-items:center;justify-content:space-between;gap:10px}
+.shiprow{display:flex;align-items:center;gap:12px;padding:10px 16px;border-top:1px solid var(--line2);min-height:52px}
+.shiprow.check{cursor:pointer}
+.shipmain{flex:1;min-width:0}.shipmain b{display:block;font-weight:600;overflow-wrap:anywhere}.shipmain small{display:block;color:var(--muted);font-size:12.5px}
+.shipcheck{width:24px;height:24px;flex:0 0 24px}
+.shipcount{width:92px;font-size:17px;text-align:center;padding:8px}
+.shipmatch{font:600 12.5px/1.3 Barlow,sans-serif;min-width:92px;display:inline-block}
+.shipmatch.ok{color:#2e9e52}.shipmatch.bad{color:var(--bad);max-width:170px}
+.shipsign{border-top:1px solid var(--line);padding:12px 16px 8px;background:var(--panel2)}
+.shipstmt{margin:0 0 8px;font-weight:600;font-size:13.5px}
+.sigpad{width:100%;max-width:560px;height:auto;aspect-ratio:560/170;background:#fff;border:1.5px dashed var(--line);border-radius:8px;touch-action:none;display:block}
+.sigbtns{display:flex;gap:8px;margin-top:8px}
+.sigimg{display:block;max-width:320px;width:100%;background:#fff;border:1px solid var(--line);border-radius:8px}
+.sigmeta{display:flex;align-items:center;gap:10px;flex-wrap:wrap;color:var(--muted);font-size:12.5px;margin-top:6px}
+.shipphotos{padding:10px 16px}
+.shipfoot{display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding:6px 0 40px}
+.shipmissing{flex:1;min-width:220px;color:var(--muted);font-size:13.5px}
+.shipdone{flex:1;min-width:220px;font-weight:600;color:#2e9e52}
+@media print{
+  body.print-ship .app>header.top,body.print-ship .noprint,body.print-ship .toasts,body.print-ship .shipfoot button,body.print-ship .sigbtns,body.print-ship .photocell .del{display:none!important}
+  body.print-ship .shipwrap{overflow:visible}
+  body.print-ship .shipsec{break-inside:avoid;border:1px solid #000}
+  body.print-ship .photogrid{display:grid;grid-template-columns:repeat(3,1fr);gap:6px}
+}
+.shipsec .tiresempty{padding:10px 16px}
