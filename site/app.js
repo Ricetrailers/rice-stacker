@@ -4276,7 +4276,7 @@ function renderShip(root, ld) {
   // 2. tires and wheels
   var tireRows = [];
   tires.forEach(function (t) {
-    tireRows.push(countRow(t.style, tireSub(t), 'tires', t.key, t.qty));
+    tireRows.push(countRow((t.qty !== '' && t.qty != null ? t.qty + ' × ' : '') + t.style, [t.qty !== '' && t.qty != null ? 'Should have ' + t.qty + ' tires' : '', tireSub(t)].filter(Boolean).join(' · '), 'tires', t.key, t.qty));
     var tin = h('input', { class: 'shiptin', placeholder: 'TIN off the tire sidewall (DOT number)', 'aria-label': 'TIN for ' + t.style, autocapitalize: 'characters', disabled: locked || null }); tin.value = tinOf(t);
     tin.addEventListener('keydown', function (e) { e.stopPropagation(); });
     tin.addEventListener('change', function () { rec.tins[t.key] = tin.value.trim().toUpperCase(); tin.value = rec.tins[t.key]; touch(); refreshFoot(); });
