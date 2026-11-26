@@ -4070,6 +4070,10 @@ function partsLoadModal(partsNo, host) {
    The ERP gives the tire and the axles for each trailer (t.tire, t.axle). When it has neither, the
    weight rating in the model description picks the usual tire for that rating, and the screen says so. */
 var LUGS_BY_AXLE = { 2000: 5, 3500: 5, 5200: 6, 6000: 6, 7000: 8, 8000: 8, 10000: 8, 12000: 8 };
+/* Duals and 17.5 wheels take a different lug nut than the standard wheels. Josh is confirming the exact
+   nut for each; put the names here when known and they show on the ship-out check. */
+var LUG_KINDS = { std: 'standard', hd: 'dual / 17.5 type' };
+function lugKind(style) { return /DUAL/i.test(style) || /17\.5/.test(style) ? 'hd' : 'std'; }
 function tireKey(s) { return (String(s || '').match(/\d+(\.\d+)?/g) || []).slice(0, 3).join('-'); }
 function tireSpec(t) {
   var tire = t.tire || '', axle = t.axle || '', by = tire ? (t.tire_by || 'erp') : '';
@@ -4289,15 +4293,15 @@ function renderShip(root, ld) {
     if (t.lugs) {
       var lb = h('input', { type: 'checkbox', class: 'shipcheck', disabled: locked || null }); lb.checked = !!rec.lugs[t.key];
       lb.addEventListener('change', function () { if (lb.checked) rec.lugs[t.key] = t.lugs; else delete rec.lugs[t.key]; touch(); refreshFoot(); });
-      tireRows.push(h('label', { class: 'shiprow check sub2' }, [lb, h('div', { class: 'shipmain' }, [h('b', null, [t.lugs + ' lug nuts are with the load']), h('small', null, [t.lugsPer + ' per wheel'])])]));
+      tireRows.push(h('label', { class: 'shiprow check sub2' }, [lb, h('div', { class: 'shipmain' }, [h('b', null, [t.lugs + ' lug nuts are with the load']), h('small', null, [t.lugsPer + ' per wheel · ' + LUG_KINDS[lugKind(t.style)] + ' lug nut'])])]));
     }
   });
   if (tires.length) {
-    var totTires = 0, totLugs = 0;
-    tires.forEach(function (t) { totTires += parseFloat(t.qty) || 0; totLugs += t.lugs || 0; });
+    var totTires = 0;
+    tires.forEach(function (t) { totTires += parseFloat(t.qty) || 0; });
     tireRows.push(h('div', { class: 'shiptotal' }, [h('div', { class: 'tsum-head' }, ['Tire list'])].concat(tires.map(function (t) {
       return h('div', { class: 'tsum-row' }, [h('span', null, [t.style]), h('b', null, [String(t.qty !== '' && t.qty != null ? t.qty : '?')])]);
-    })).concat([h('div', { class: 'tsum-row total' }, [h('span', null, ['Total tires']), h('b', null, [String(totTires)])]), totLugs ? h('div', { class: 'tsum-row' }, [h('span', null, ['Total lug nuts']), h('b', null, [String(totLugs)])]) : null])));
+    })).concat([h('div', { class: 'tsum-row total' }, [h('span', null, ['Total tires']), h('b', null, [String(totTires)])]), ].concat(['std', 'hd'].map(function (k) { var n = 0; tires.forEach(function (t) { if (lugKind(t.style) === k) n += t.lugs || 0; }); return n ? h('div', { class: 'tsum-row' }, [h('span', null, ['Lug nuts, ' + LUG_KINDS[k]]), h('b', null, [String(n)])]) : null; }))));
   }
   if (tireInfo.unknown) tireRows.push(h('div', { class: 'tiresempty' }, [tireInfo.unknown + ' trailer' + (tireInfo.unknown > 1 ? 's have' : ' has') + ' no tire size on file. Add the tires on the stack sheet.']));
   if (!tires.length && !tireInfo.unknown) tireRows = [h('div', { class: 'tiresempty' }, ['No tires or wheels are listed on this load.'])];
