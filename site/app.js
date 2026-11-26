@@ -1377,7 +1377,7 @@ function duplicateLoad(src) {
   copy.status = 'open'; copy.prepped = false; copy.truckCo = ''; copy.truckDate = ''; copy.truckTime = '';
   copy.prepDate = ''; copy.prepTime = ''; copy.stackDate = ''; copy.stackTime = '';
   copy.type = src.type || 'stack'; copy.custPickup = !!src.custPickup;
-  copy.photos = []; copy.created = Date.now(); copy.updated = Date.now();
+  copy.photos = []; delete copy.ship; copy.created = Date.now(); copy.updated = Date.now();
   copy.placements.forEach(function (p) { p.id = uid(); });
   state.loads.unshift(copy);
   markDirty();
@@ -1691,9 +1691,10 @@ function calendarEventDlg(ev) {
   var kind=h('select',{'aria-label':'Appointment type'},[['prep','Prep'],['stack','Stack / Load'],['pickup','Pickup']].map(function(x){return h('option',{value:x[0]},[x[1]]);}));kind.value=ev.kind;
   var date=h('input',{type:'date',required:true,'aria-label':'Appointment date'});date.value=ev.date;
   var time=h('input',{type:'time','aria-label':'Appointment time'});time.value=ev.time||'';
-  var status=h('select',{'aria-label':'Load progress'},[['open','New load'],['prep','Needs prep'],['prepped','Prepped'],['stack','Needs stacking / loading'],['ready','Ready to ship'],['picked','Shipped / picked up']].map(function(x){return h('option',{value:x[0]},[x[1]]);}));
+  var status=h('select',{'aria-label':'Load progress'},[['open','New load'],['prep','Needs prep'],['prepped','Prepped'],['stack','Needs stacking / loading'],['ready','Ready to ship']].concat(l.status==='picked'?[['picked','Shipped / picked up']]:[]).map(function(x){return h('option',{value:x[0]},[x[1]]);}));
   var originalStatus=workflowStage(l)===2?'prepped':(l.status||'prep');status.value=originalStatus;
   [kind,date,time,status].forEach(function(n){n.disabled=readonly;});
+  if(l.status==='picked'&&l.ship&&l.ship.shippedAt)status.disabled=true;
   var feedback=h('p',{class:'sub',role:'alert'});
   function close(){scrim.remove();}
   function field(label,node){return h('label',{style:'display:grid;gap:5px'},[label,node]);}
@@ -1854,9 +1855,11 @@ function renderHome(root) {
     if (ld.truckDate && stat !== 'picked') badges.push(h('span', { class: 'pill truck' }, ['\ud83d\ude9a ' + bookingStr(ld)]));
     var btns = null;
     if (!isYard()) {
-      var sel = h('select', { class: 'statussel', title: 'Load status' }, ['open', 'prep', 'prepped', 'stack', 'ready', 'picked'].map(function (st) {
+      var sel = h('select', { class: 'statussel', title: 'Load status' }, ['open', 'prep', 'prepped', 'stack', 'ready'].concat(stat === 'picked' ? ['picked'] : []).map(function (st) {
         return h('option', { value: st }, [st === 'prepped' ? 'Prepped' : statusLabel(st)]);
       }));
+      // A load only becomes shipped through the ship-out check. One that was shipped that way is changed by reopening its record.
+      if (stat === 'picked' && ld.ship && ld.ship.shippedAt) { sel.disabled = true; sel.title = 'Shipped with a signed record. Open the record and use Reopen to change it.'; }
       sel.value = workflowStage(ld) === 2 ? 'prepped' : stat;
       sel.addEventListener('click', function (e) { e.stopPropagation(); });
       sel.addEventListener('change', function (e) {
@@ -1873,8 +1876,9 @@ function renderHome(root) {
         } }, [ld.prepped ? '\u2705' : '\u2610']) : null,
         h('button', { class: 'iconbtn', title: ld.truckDate ? 'Edit truck booking' : 'Book a truck', onclick: function (e) { e.stopPropagation(); bookTruckDlg(ld); } }, ['\ud83d\ude9a']),
         h('button', { class: 'iconbtn', title: 'Duplicate load', onclick: function (e) { e.stopPropagation(); duplicateLoad(ld); } }, ['\u29c9']),
-        h('button', { class: 'iconbtn danger', title: 'Delete load', onclick: function (e) {
+        h('button', { class: 'iconbtn danger', title: stat === 'picked' ? 'Shipped loads are kept and cannot be deleted' : 'Delete load', onclick: function (e) {
           e.stopPropagation();
+          if (stat === 'picked') { toast('Shipped loads are kept as the record and cannot be deleted.', true); return; }
           confirmModal('Delete load ' + (ld.loadNo ? '#' + ld.loadNo : '') + '? Its photos are removed too.', function () {
             ld.photos.forEach(function (ph) { removePhotoFile(ph); });
             state.loads = state.loads.filter(function (x) { return x.id !== ld.id; });
@@ -4227,6 +4231,7 @@ function signaturePad(onSave) {
 function renderShip(root, ld) {
   var rec = shipRec(ld), done = !!rec.shippedAt, locked = done;
   var trailers = shipTrailers(ld), tireInfo = shipTires(ld), tires = tireInfo.rows, items = ld.items || [];
+  var erpNotDone = done || !erpFor(ld) ? 0 : (erpFor(ld).trailers || []).filter(function (t) { return erpStage(t).k !== 'done'; }).length;
   function tinOf(t) { return rec.tins[t.key] != null ? rec.tins[t.key] : (t.tin || ''); }
   var partsLinks = erpLinksFor(ld.loadNo).filter(function (k) { return k.sure && k.no && erp.rows[k.no] && erpKind(erp.rows[k.no]) === 'parts'; });
   function touch() { ld.updated = Date.now(); markDirty(); }
@@ -4367,13 +4372,13 @@ function renderShip(root, ld) {
     if (done) {
       foot.appendChild(h('div', { class: 'shipdone' }, ['Shipped ' + when(rec.shippedAt) + ' by ' + (rec.shippedBy || 'the yard') + (rec.mismatches ? ' · ' + rec.mismatches + ' count' + (rec.mismatches > 1 ? 's' : '') + ' did not match the paperwork' : '')]));
       foot.appendChild(h('button', { class: 'btn', onclick: function () { document.body.classList.add('print-ship'); setTimeout(function () { window.print(); setTimeout(function () { document.body.classList.remove('print-ship'); }, 400); }, 60); } }, ['Print or save as PDF']));
-      if (!isYard()) foot.appendChild(h('button', { class: 'btn ghost', onclick: function () { confirmModal('Reopen this load? It goes back to Ready to ship and the record can be changed.', function () { delete rec.shippedAt; delete rec.shippedBy; ld.status = 'ready'; touch(); go('ship', ld.id); }, { okLabel: 'Reopen' }); } }, ['Reopen']));
+      if (realRole() === 'admin' && !viewAsYard) foot.appendChild(h('button', { class: 'btn ghost', onclick: function () { confirmModal('Reopen this load? It goes back to Ready to ship and the record can be changed. The reopen is written on the record.', function () { if (!rec.history) rec.history = []; rec.history.push({ what: 'reopened', at: Date.now(), by: whoAmI(), was: rec.shippedAt }); delete rec.shippedAt; delete rec.shippedBy; ld.status = 'ready'; touch(); go('ship', ld.id); }, { okLabel: 'Reopen' }); } }, ['Reopen']));
       return;
     }
     var ms = missing();
     foot.appendChild(h('div', { class: 'shipmissing' }, [ms.list.length ? 'Still needed: ' + ms.list.join(', ') + '.' : ms.mism ? ms.mism + ' count' + (ms.mism > 1 ? 's do' : ' does') + ' not match the paperwork.' : 'Everything is checked and signed.']));
     foot.appendChild(h('button', { class: 'btn primary', disabled: ms.list.length ? 'disabled' : null, onclick: function () {
-      var shipIt = function () { tires.forEach(function (t) { if (rec.tins[t.key] == null && t.tin) rec.tins[t.key] = t.tin; }); rec.tireList = tires.map(function (t) { return { style: t.style, qty: t.qty, counted: rec.tires[t.key], tin: tinOf(t), lugs: t.lugs }; }); rec.shippedAt = Date.now(); rec.shippedBy = whoAmI(); rec.mismatches = ms.mism; ld.status = 'picked'; ld.prepped = true; touch(); toast((ld.loadNo ? '#' + ld.loadNo : 'Load') + ' shipped. The record is under Shipped loads.'); go('home'); };
+      var shipIt = function () { tires.forEach(function (t) { if (rec.tins[t.key] == null && t.tin) rec.tins[t.key] = t.tin; }); rec.tireList = tires.map(function (t) { return { style: t.style, qty: t.qty, counted: rec.tires[t.key], tin: tinOf(t), lugs: t.lugs }; }); rec.shippedAt = Date.now(); rec.shippedBy = whoAmI(); rec.mismatches = ms.mism; if (!rec.history) rec.history = []; rec.history.push({ what: 'shipped', at: rec.shippedAt, by: rec.shippedBy, driver: rec.driver || '' }); ld.status = 'picked'; ld.prepped = true; touch(); toast((ld.loadNo ? '#' + ld.loadNo : 'Load') + ' shipped. The record is under Shipped loads.'); go('home'); };
       if (ms.mism) confirmModal(ms.mism + ' count' + (ms.mism > 1 ? 's do' : ' does') + ' not match the paperwork. Ship it anyway? The mismatch stays on the record.', shipIt, { okLabel: 'Ship anyway', danger: true }); else shipIt();
     } }, ['Ship load']));
   }
@@ -4384,6 +4389,7 @@ function renderShip(root, ld) {
       h('div', { class: 'viewtoggle noprint' }, [h('button', { class: 'btn backbtn', onclick: function () { go('home'); } }, ['← Back to board']), h('button', { class: 'btn ghost', onclick: function () { go(isYard() ? 'editor' : 'view', ld.id); } }, ['View load'])])
     ]),
     erpFor(ld) && erpFor(ld).head.notes ? h('div', { class: 'erpnote' }, [erpFor(ld).head.notes]) : null,
+    erpNotDone ? h('div', { class: 'shipnote noprint' }, ['Heads up: the ERP shows ' + erpNotDone + ' of these trailers as not finished. This does not stop the load from shipping.']) : null,
     section(1, 'Trailers on the load', trRows),
     section(2, 'Tires, wheels and lug nuts', tireRows),
     section(3, 'Parts', partRows),
@@ -4392,6 +4398,7 @@ function renderShip(root, ld) {
       h('div', { class: 'shiprow' }, [driver, truck]),
       signBlock('driver', 'Driver', 'Driver: the trailers, tires, wheels, lug nuts and parts listed above are all on this load and correct.'),
       h('div', { class: 'shiprow' }, [h('div', { class: 'shipmain' }, [h('small', null, [done ? 'Checked and shipped for Rice by ' + (rec.shippedBy || 'the yard') : 'Checked for Rice by ' + whoAmI() + '. Your name goes on the record when you press Ship load.'])])])]),
+    (rec.history || []).length > 1 || (rec.history || []).some(function (x) { return x.what === 'reopened'; }) ? h('div', { class: 'card shipsec' }, [h('div', { class: 'card-head' }, [h('h2', null, ['Record history'])])].concat(rec.history.map(function (x) { return h('div', { class: 'shiprow' }, [h('div', { class: 'shipmain' }, [h('b', null, [(x.what === 'shipped' ? 'Shipped' : 'Reopened') + ' ' + when(x.at) + ' by ' + (x.by || 'the yard')]), x.what === 'shipped' && x.driver ? h('small', null, ['Driver ' + x.driver]) : null])]); }))) : null,
     foot
   ])]));
 }
