@@ -4301,7 +4301,7 @@ function renderShip(root, ld) {
     tires.forEach(function (t) { totTires += parseFloat(t.qty) || 0; });
     tireRows.push(h('div', { class: 'shiptotal' }, [h('div', { class: 'tsum-head' }, ['Tire list'])].concat(tires.map(function (t) {
       return h('div', { class: 'tsum-row' }, [h('span', null, [t.style]), h('b', null, [String(t.qty !== '' && t.qty != null ? t.qty : '?')])]);
-    })).concat([h('div', { class: 'tsum-row total' }, [h('span', null, ['Total tires']), h('b', null, [String(totTires)])]), ].concat(['std', 'hd'].map(function (k) { var n = 0; tires.forEach(function (t) { if (lugKind(t.style) === k) n += t.lugs || 0; }); return n ? h('div', { class: 'tsum-row' }, [h('span', null, ['Lug nuts, ' + LUG_KINDS[k]]), h('b', null, [String(n)])]) : null; }))));
+    })).concat([h('div', { class: 'tsum-row total' }, [h('span', null, ['Total tires']), h('b', null, [String(totTires)])])].concat(['std', 'hd'].map(function (k) { var n = 0; tires.forEach(function (t) { if (lugKind(t.style) === k) n += t.lugs || 0; }); return n ? h('div', { class: 'tsum-row' }, [h('span', null, ['Lug nuts, ' + LUG_KINDS[k]]), h('b', null, [String(n)])]) : null; })))));
   }
   if (tireInfo.unknown) tireRows.push(h('div', { class: 'tiresempty' }, [tireInfo.unknown + ' trailer' + (tireInfo.unknown > 1 ? 's have' : ' has') + ' no tire size on file. Add the tires on the stack sheet.']));
   if (!tires.length && !tireInfo.unknown) tireRows = [h('div', { class: 'tiresempty' }, ['No tires or wheels are listed on this load.'])];
