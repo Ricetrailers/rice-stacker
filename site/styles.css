@@ -746,4 +746,7 @@ header.top{height:auto;min-height:52px;flex-wrap:wrap;padding:10px 16px;gap:8px 
 .shiprow.sub2{min-height:40px;padding:6px 16px 6px 34px;border-top:0}
 .shiptin{flex:1;min-width:0;max-width:420px;text-transform:uppercase;font-family:ui-monospace,Menlo,monospace}
 .load-page-tab.backtab{font-weight:600}
-.shiptotal{background:var(--line2);font-size:15px}
+.shiptotal{margin:10px 16px 8px;border:1px solid var(--line);border-radius:8px;background:var(--line2);padding:8px 12px;max-width:460px}
+.tsum-head{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);margin-bottom:4px}
+.tsum-row{display:flex;justify-content:space-between;gap:16px;padding:3px 0;font-size:14px}
+.tsum-row.total{border-top:1px solid var(--line);margin-top:4px;padding-top:6px;font-weight:700;font-size:15px}

@@ -4295,7 +4295,9 @@ function renderShip(root, ld) {
   if (tires.length) {
     var totTires = 0, totLugs = 0;
     tires.forEach(function (t) { totTires += parseFloat(t.qty) || 0; totLugs += t.lugs || 0; });
-    tireRows.push(h('div', { class: 'shiprow shiptotal' }, [h('div', { class: 'shipmain' }, [h('b', null, ['Total: ' + totTires + ' tires' + (totLugs ? ' · ' + totLugs + ' lug nuts' : '')]), h('small', null, [tires.length + ' tire size' + (tires.length > 1 ? 's' : '') + ' on this load'])])]));
+    tireRows.push(h('div', { class: 'shiptotal' }, [h('div', { class: 'tsum-head' }, ['Tire list'])].concat(tires.map(function (t) {
+      return h('div', { class: 'tsum-row' }, [h('span', null, [t.style]), h('b', null, [String(t.qty !== '' && t.qty != null ? t.qty : '?')])]);
+    })).concat([h('div', { class: 'tsum-row total' }, [h('span', null, ['Total tires']), h('b', null, [String(totTires)])]), totLugs ? h('div', { class: 'tsum-row' }, [h('span', null, ['Total lug nuts']), h('b', null, [String(totLugs)])]) : null])));
   }
   if (tireInfo.unknown) tireRows.push(h('div', { class: 'tiresempty' }, [tireInfo.unknown + ' trailer' + (tireInfo.unknown > 1 ? 's have' : ' has') + ' no tire size on file. Add the tires on the stack sheet.']));
   if (!tires.length && !tireInfo.unknown) tireRows = [h('div', { class: 'tiresempty' }, ['No tires or wheels are listed on this load.'])];
