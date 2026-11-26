@@ -4159,6 +4159,11 @@ function renderView(root, ld) {
   var tireRows = tires.rows.map(function (t) {
     return line(t.style, [tireSub(t), t.tin ? 'TIN ' + t.tin : 'No TIN yet'].filter(Boolean).join(' · '), h('span', { class: 'viewqty' }, [(t.qty !== '' ? t.qty + ' tires' : '') + (t.lugs ? ' · ' + t.lugs + ' lug nuts' : '')]));
   });
+  if (tires.rows.length > 1) {
+    var vt = 0, vl = 0;
+    tires.rows.forEach(function (t) { vt += parseFloat(t.qty) || 0; vl += t.lugs || 0; });
+    tireRows.push(line('Total', '', h('span', { class: 'viewqty' }, [vt + ' tires' + (vl ? ' · ' + vl + ' lug nuts' : '')])));
+  }
   if (tires.unknown) tireRows.push(h('div', { class: 'tiresempty' }, [tires.unknown + ' trailer' + (tires.unknown > 1 ? 's have' : ' has') + ' no tire size on file.']));
   if (!tireRows.length) tireRows = [h('div', { class: 'tiresempty' }, ['No tire info on this load yet.'])];
   var partRows = (ld.items || []).map(function (it) { return line((it.part ? it.part + '  ' : '') + (it.desc || ''), it.from ? 'From parts load #' + it.from : '', h('span', { class: 'viewqty' }, ['× ' + (it.qty || 0)])); });
@@ -4287,6 +4292,11 @@ function renderShip(root, ld) {
       tireRows.push(h('label', { class: 'shiprow check sub2' }, [lb, h('div', { class: 'shipmain' }, [h('b', null, [t.lugs + ' lug nuts are with the load']), h('small', null, [t.lugsPer + ' per wheel'])])]));
     }
   });
+  if (tires.length) {
+    var totTires = 0, totLugs = 0;
+    tires.forEach(function (t) { totTires += parseFloat(t.qty) || 0; totLugs += t.lugs || 0; });
+    tireRows.push(h('div', { class: 'shiprow shiptotal' }, [h('div', { class: 'shipmain' }, [h('b', null, ['Total: ' + totTires + ' tires' + (totLugs ? ' · ' + totLugs + ' lug nuts' : '')]), h('small', null, [tires.length + ' tire size' + (tires.length > 1 ? 's' : '') + ' on this load'])])]));
+  }
   if (tireInfo.unknown) tireRows.push(h('div', { class: 'tiresempty' }, [tireInfo.unknown + ' trailer' + (tireInfo.unknown > 1 ? 's have' : ' has') + ' no tire size on file. Add the tires on the stack sheet.']));
   if (!tires.length && !tireInfo.unknown) tireRows = [h('div', { class: 'tiresempty' }, ['No tires or wheels are listed on this load.'])];
   // 3. parts
